@@ -1,3 +1,5 @@
+mod theme;
+
 use gpui_kit::*;
 
 struct Shell;
@@ -6,19 +8,44 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
-            .bg(rgb(0x0b0714))
-            .text_color(rgb(0xf3eefc))
+            .bg(theme::backdrop())
+            .text_color(theme::text())
+            .font_family(theme::FONT_UI)
             .flex()
             .items_center()
             .justify_center()
-            .child("lilac")
+            .child(
+                theme::glass()
+                    .px_8()
+                    .py_6()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_xl().child("lilac")),
+            )
     }
 }
 
 fn main() {
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Shell))
+
+        let bounds = Bounds::centered(None, size(px(1320.0), px(840.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("lilac".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_background: WindowBackgroundAppearance::Blurred,
+            window_min_size: Some(size(px(960.0), px(600.0))),
+            app_id: Some("lilac".into()),
+            ..Default::default()
+        };
+
+        gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Shell))
             .expect("failed to open window");
+        cx.activate(true);
     });
 }
