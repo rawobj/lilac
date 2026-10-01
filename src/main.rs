@@ -1,4 +1,6 @@
 mod assets;
+mod paths;
+mod runtime;
 mod theme;
 
 use gpui_kit::*;
