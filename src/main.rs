@@ -9,6 +9,7 @@ mod settings;
 mod spotify;
 mod theme;
 mod ui;
+mod ui_state;
 
 use gpui_kit::*;
 
