@@ -3744,10 +3744,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "image",
  "librespot-oauth",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "smallvec",
  "tokio",
 ]
 

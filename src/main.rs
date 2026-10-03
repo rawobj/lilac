@@ -1,4 +1,5 @@
 mod assets;
+mod images;
 mod model;
 mod nav;
 mod paths;
