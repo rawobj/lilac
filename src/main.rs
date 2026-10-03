@@ -1,5 +1,6 @@
 mod assets;
 mod model;
+mod nav;
 mod paths;
 mod runtime;
 mod settings;
