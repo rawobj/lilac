@@ -4,6 +4,7 @@ mod model;
 mod nav;
 mod paths;
 mod runtime;
+mod session;
 mod settings;
 mod spotify;
 mod theme;
