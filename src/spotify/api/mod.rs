@@ -16,6 +16,7 @@ use super::http;
 use super::oauth::{self, Credentials};
 use crate::model::User;
 
+mod catalog;
 mod library;
 
 const BASE: &str = "https://api.spotify.com/v1";
