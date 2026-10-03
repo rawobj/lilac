@@ -2,6 +2,7 @@ mod assets;
 mod model;
 mod paths;
 mod runtime;
+mod settings;
 mod spotify;
 mod theme;
 
