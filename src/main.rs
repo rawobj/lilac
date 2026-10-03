@@ -7,6 +7,7 @@ mod runtime;
 mod settings;
 mod spotify;
 mod theme;
+mod ui;
 
 use gpui_kit::*;
 
