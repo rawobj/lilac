@@ -5,6 +5,7 @@ mod library;
 mod model;
 mod nav;
 mod paths;
+mod player;
 mod runtime;
 mod session;
 mod settings;
