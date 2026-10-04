@@ -2,6 +2,7 @@ mod actions;
 mod app;
 mod assets;
 mod images;
+mod keys;
 mod library;
 mod menus;
 mod model;
@@ -27,6 +28,7 @@ fn main() {
             gpui_kit::init(cx);
             images::ImageCache::init(cx);
             app::AppState::init(cx);
+            keys::init(cx);
 
             let bounds = Bounds::centered(None, size(px(1320.0), px(840.0)), cx);
             let options = WindowOptions {
