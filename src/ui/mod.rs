@@ -1,6 +1,7 @@
 //! Small stateless building blocks shared by the views.
 
 pub mod icons;
+pub mod slider;
 
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
