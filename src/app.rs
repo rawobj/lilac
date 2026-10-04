@@ -8,6 +8,7 @@ use gpui_kit::*;
 use crate::library::Library;
 use crate::nav::{Nav, Route};
 use crate::player::Player;
+use crate::search::Search;
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::spotify::api::Api;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub player: Entity<Player>,
     pub nav: Entity<Nav>,
     pub ui: Entity<UiState>,
+    pub search: Entity<Search>,
     pub settings: Entity<Settings>,
 }
 
@@ -35,12 +37,15 @@ impl AppState {
         let library = cx.new(|cx| Library::new(&session, cx));
         let player = cx.new(|cx| Player::new(&session, &stored, cx));
 
+        let search = cx.new(|_| Search::default());
+
         cx.set_global(AppState {
             session,
             library,
             player,
             nav,
             ui,
+            search,
             settings,
         });
     }
@@ -64,6 +69,10 @@ pub fn nav(cx: &App) -> Entity<Nav> {
 
 pub fn ui(cx: &App) -> Entity<UiState> {
     cx.global::<AppState>().ui.clone()
+}
+
+pub fn search(cx: &App) -> Entity<Search> {
+    cx.global::<AppState>().search.clone()
 }
 
 pub fn settings(cx: &App) -> Entity<Settings> {

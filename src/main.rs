@@ -7,6 +7,7 @@ mod nav;
 mod paths;
 mod player;
 mod runtime;
+mod search;
 mod session;
 mod settings;
 mod spotify;
