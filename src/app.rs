@@ -5,6 +5,7 @@
 
 use gpui_kit::*;
 
+use crate::library::Library;
 use crate::nav::{Nav, Route};
 use crate::session::Session;
 use crate::settings::Settings;
@@ -13,6 +14,7 @@ use crate::ui_state::UiState;
 
 pub struct AppState {
     pub session: Entity<Session>,
+    pub library: Entity<Library>,
     pub nav: Entity<Nav>,
     pub ui: Entity<UiState>,
     pub settings: Entity<Settings>,
@@ -28,9 +30,11 @@ impl AppState {
         let session = cx.new(Session::new);
         let nav = cx.new(|_| Nav::new());
         let ui = cx.new(|_| UiState::new(stored.sidebar_collapsed, stored.show_now_playing));
+        let library = cx.new(|cx| Library::new(&session, cx));
 
         cx.set_global(AppState {
             session,
+            library,
             nav,
             ui,
             settings,
@@ -40,6 +44,10 @@ impl AppState {
 
 pub fn session(cx: &App) -> Entity<Session> {
     cx.global::<AppState>().session.clone()
+}
+
+pub fn library(cx: &App) -> Entity<Library> {
+    cx.global::<AppState>().library.clone()
 }
 
 pub fn nav(cx: &App) -> Entity<Nav> {

@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod images;
+mod library;
 mod model;
 mod nav;
 mod paths;
