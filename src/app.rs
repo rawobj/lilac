@@ -7,6 +7,7 @@ use gpui_kit::*;
 
 use crate::library::Library;
 use crate::nav::{Nav, Route};
+use crate::player::Player;
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::spotify::api::Api;
@@ -15,6 +16,7 @@ use crate::ui_state::UiState;
 pub struct AppState {
     pub session: Entity<Session>,
     pub library: Entity<Library>,
+    pub player: Entity<Player>,
     pub nav: Entity<Nav>,
     pub ui: Entity<UiState>,
     pub settings: Entity<Settings>,
@@ -31,10 +33,12 @@ impl AppState {
         let nav = cx.new(|_| Nav::new());
         let ui = cx.new(|_| UiState::new(stored.sidebar_collapsed, stored.show_now_playing));
         let library = cx.new(|cx| Library::new(&session, cx));
+        let player = cx.new(|cx| Player::new(&session, &stored, cx));
 
         cx.set_global(AppState {
             session,
             library,
+            player,
             nav,
             ui,
             settings,
@@ -48,6 +52,10 @@ pub fn session(cx: &App) -> Entity<Session> {
 
 pub fn library(cx: &App) -> Entity<Library> {
     cx.global::<AppState>().library.clone()
+}
+
+pub fn player(cx: &App) -> Entity<Player> {
+    cx.global::<AppState>().player.clone()
 }
 
 pub fn nav(cx: &App) -> Entity<Nav> {
