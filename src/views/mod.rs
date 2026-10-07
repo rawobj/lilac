@@ -1,6 +1,7 @@
 //! The window's root view: lays out the panels and hosts overlays.
 
 mod login;
+mod sidebar;
 mod top_bar;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -14,6 +15,7 @@ use crate::ui::{self, icons};
 use crate::ui_state::RightPanel;
 
 use login::LoginView;
+use sidebar::Sidebar;
 use top_bar::TopBar;
 
 /// Wrap a child view so it is only re-rendered when it changes itself.
@@ -82,6 +84,7 @@ pub struct Lilac {
     focus: FocusHandle,
     login: Entity<LoginView>,
     top_bar: Entity<TopBar>,
+    sidebar: Entity<Sidebar>,
 }
 
 impl Lilac {
@@ -106,6 +109,7 @@ impl Lilac {
             focus,
             login: cx.new(|_| LoginView),
             top_bar: cx.new(|cx| TopBar::new(window, cx)),
+            sidebar: cx.new(|cx| Sidebar::new(window, cx)),
         }
     }
 
@@ -191,6 +195,7 @@ impl Render for Lilac {
             Status::LoggedIn => {
                 let layout =
                     Layout::compute(window.viewport_size().width, sidebar_collapsed, panel);
+                let sidebar_width = layout.sidebar;
                 div()
                     .size_full()
                     .flex()
@@ -209,6 +214,17 @@ impl Render for Lilac {
                             .px(px(theme::GAP))
                             .flex()
                             .gap(px(theme::GAP))
+                            .child(
+                                theme::glass()
+                                    .flex_none()
+                                    .w(px(sidebar_width))
+                                    .h_full()
+                                    .overflow_hidden()
+                                    .child(cached(
+                                        &self.sidebar,
+                                        StyleRefinement::default().size_full(),
+                                    )),
+                            )
                             .child(
                                 theme::glass()
                                     .flex_1()
