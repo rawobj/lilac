@@ -2,6 +2,7 @@
 
 pub mod icons;
 pub mod slider;
+pub mod track_row;
 
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
