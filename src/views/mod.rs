@@ -1,6 +1,7 @@
 //! The window's root view: lays out the panels and hosts overlays.
 
 mod login;
+mod player_bar;
 mod sidebar;
 mod top_bar;
 
@@ -15,6 +16,7 @@ use crate::ui::{self, icons};
 use crate::ui_state::RightPanel;
 
 use login::LoginView;
+use player_bar::PlayerBar;
 use sidebar::Sidebar;
 use top_bar::TopBar;
 
@@ -85,6 +87,7 @@ pub struct Lilac {
     login: Entity<LoginView>,
     top_bar: Entity<TopBar>,
     sidebar: Entity<Sidebar>,
+    player_bar: Entity<PlayerBar>,
 }
 
 impl Lilac {
@@ -110,6 +113,7 @@ impl Lilac {
             login: cx.new(|_| LoginView),
             top_bar: cx.new(|cx| TopBar::new(window, cx)),
             sidebar: cx.new(|cx| Sidebar::new(window, cx)),
+            player_bar: cx.new(PlayerBar::new),
         }
     }
 
@@ -238,6 +242,13 @@ impl Render for Lilac {
                                     )),
                             ),
                     )
+                    .child(cached(
+                        &self.player_bar,
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(px(theme::PLAYER_BAR_HEIGHT))
+                            .flex_none(),
+                    ))
                     .into_any_element()
             }
         };
