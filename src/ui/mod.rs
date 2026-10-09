@@ -1,5 +1,6 @@
 //! Small stateless building blocks shared by the views.
 
+pub mod card;
 pub mod icons;
 pub mod slider;
 pub mod track_row;
