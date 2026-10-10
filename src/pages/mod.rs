@@ -1,5 +1,6 @@
 //! Pages shown in the main panel, one per route.
 
+mod artist;
 mod collection;
 mod home;
 mod search;
@@ -30,6 +31,7 @@ pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         Route::Album(id) => cx
             .new(|cx| CollectionPage::new(Source::Album(id), cx))
             .into(),
+        Route::Artist(id) => cx.new(|cx| artist::ArtistPage::new(id, cx)).into(),
         _ => cx.new(|_| ComingSoon).into(),
     }
 }
