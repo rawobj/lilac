@@ -3,6 +3,7 @@
 mod artist;
 mod collection;
 mod home;
+mod profile;
 mod search;
 mod show;
 
@@ -34,6 +35,7 @@ pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
             .into(),
         Route::Artist(id) => cx.new(|cx| artist::ArtistPage::new(id, cx)).into(),
         Route::Show(id) => cx.new(|cx| show::ShowPage::new(id, cx)).into(),
+        Route::Profile => cx.new(profile::ProfilePage::new).into(),
         _ => cx.new(|_| ComingSoon).into(),
     }
 }
