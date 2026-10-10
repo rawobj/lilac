@@ -1,12 +1,14 @@
 //! The window's root view: lays out the panels and hosts overlays.
 
 mod login;
+mod overlays;
 mod player_bar;
 mod sidebar;
 mod top_bar;
 
 use std::collections::HashMap;
 
+use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -17,6 +19,7 @@ use crate::panels::RightPanelView;
 use crate::session::Status;
 use crate::theme;
 use crate::ui::{self, icons};
+use crate::ui_state::Dialog;
 use crate::ui_state::RightPanel;
 
 use login::LoginView;
@@ -95,6 +98,9 @@ pub struct Lilac {
     right_panel: Entity<RightPanelView>,
     /// Pages for every route still in the history, so going back is instant.
     pages: HashMap<Route, AnyView>,
+    dialog_name: Entity<InputState>,
+    dialog_description: Entity<InputState>,
+    shown_dialog: Option<Dialog>,
 }
 
 impl Lilac {
@@ -120,7 +126,11 @@ impl Lilac {
             cx.notify();
         })
         .detach();
-        cx.observe(&ui, |_, _, cx| cx.notify()).detach();
+        cx.observe_in(&ui, window, |this: &mut Self, _, window, cx| {
+            this.sync_dialog(window, cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let focus = cx.focus_handle();
@@ -134,7 +144,43 @@ impl Lilac {
             player_bar: cx.new(PlayerBar::new),
             right_panel: cx.new(RightPanelView::new),
             pages: HashMap::new(),
+            dialog_name: cx.new(|cx| InputState::new(window, cx).placeholder("Playlist name")),
+            dialog_description: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Add an optional description")),
+            shown_dialog: None,
         }
+    }
+
+    /// Prefill the dialog fields when a dialog opens.
+    fn sync_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = app::ui(cx).read(cx).dialog.clone();
+        if dialog == self.shown_dialog {
+            return;
+        }
+        self.shown_dialog = dialog.clone();
+        let (name, description) = match &dialog {
+            Some(Dialog::CreatePlaylist { .. }) => {
+                let count = app::library(cx).read(cx).playlists.len() + 1;
+                (format!("My Playlist #{count}"), String::new())
+            }
+            Some(Dialog::EditPlaylist { id }) => match app::library(cx).read(cx).playlist(id) {
+                Some(p) => (
+                    p.name.to_string(),
+                    p.description
+                        .as_ref()
+                        .map(|d| d.to_string())
+                        .unwrap_or_default(),
+                ),
+                None => return,
+            },
+            _ => return,
+        };
+        self.dialog_name.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+            input.focus(window, cx);
+        });
+        self.dialog_description
+            .update(cx, |input, cx| input.set_value(description, window, cx));
     }
 
     fn page(&mut self, route: &Route, window: &mut Window, cx: &mut Context<Self>) -> AnyView {
@@ -306,6 +352,13 @@ impl Render for Lilac {
             .text_sm()
             .child(self.backdrop(cx))
             .child(div().relative().size_full().child(content))
+            .children(overlays::menu(cx))
+            .children(overlays::dialog(
+                &self.dialog_name,
+                &self.dialog_description,
+                cx,
+            ))
+            .children(overlays::toasts(cx))
     }
 }
 
