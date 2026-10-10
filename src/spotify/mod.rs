@@ -1,6 +1,7 @@
 //! Everything that talks to Spotify.
 
 pub mod api;
+pub mod lyrics;
 pub mod oauth;
 
 use std::sync::OnceLock;

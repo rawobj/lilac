@@ -35,6 +35,8 @@ pub struct Settings {
     pub compact_library: bool,
     pub reduce_transparency: bool,
     pub media_keys: bool,
+    /// Look up lyrics on lrclib.net when Spotify has none. Sends title and artist there.
+    pub lrclib_lyrics: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +52,7 @@ impl Default for Settings {
             compact_library: false,
             reduce_transparency: false,
             media_keys: true,
+            lrclib_lyrics: false,
         }
     }
 }
