@@ -1,6 +1,7 @@
 //! Pages shown in the main panel, one per route.
 
 mod collection;
+mod home;
 
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
@@ -18,6 +19,7 @@ use collection::{CollectionPage, Source};
 /// Create the view for `route`.
 pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
     match route.clone() {
+        Route::Home => cx.new(home::HomePage::new).into(),
         Route::Liked => cx.new(|cx| CollectionPage::new(Source::Liked, cx)).into(),
         Route::Playlist(id) => cx
             .new(|cx| CollectionPage::new(Source::Playlist(id), cx))
