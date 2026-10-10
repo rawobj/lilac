@@ -5,11 +5,14 @@ mod player_bar;
 mod sidebar;
 mod top_bar;
 
+use std::collections::HashMap;
+
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app;
 use crate::keys::{Dismiss, FocusSearch};
+use crate::nav::Route;
 use crate::session::Status;
 use crate::theme;
 use crate::ui::{self, icons};
@@ -88,6 +91,8 @@ pub struct Lilac {
     top_bar: Entity<TopBar>,
     sidebar: Entity<Sidebar>,
     player_bar: Entity<PlayerBar>,
+    /// Pages for every route still in the history, so going back is instant.
+    pages: HashMap<Route, AnyView>,
 }
 
 impl Lilac {
@@ -100,8 +105,19 @@ impl Lilac {
             state.settings.clone(),
         );
 
-        cx.observe(&session, |_, _, cx| cx.notify()).detach();
-        cx.observe(&nav, |_, _, cx| cx.notify()).detach();
+        cx.observe(&session, |this: &mut Self, session, cx| {
+            if session.read(cx).status == Status::LoggedOut {
+                this.pages.clear();
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&nav, |this: &mut Self, nav, cx| {
+            let nav = nav.read(cx);
+            this.pages.retain(|route, _| nav.retained().contains(route));
+            cx.notify();
+        })
+        .detach();
         cx.observe(&ui, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
@@ -114,7 +130,17 @@ impl Lilac {
             top_bar: cx.new(|cx| TopBar::new(window, cx)),
             sidebar: cx.new(|cx| Sidebar::new(window, cx)),
             player_bar: cx.new(PlayerBar::new),
+            pages: HashMap::new(),
         }
+    }
+
+    fn page(&mut self, route: &Route, window: &mut Window, cx: &mut Context<Self>) -> AnyView {
+        if let Some(page) = self.pages.get(route) {
+            return page.clone();
+        }
+        let page = crate::pages::build(route, window, cx);
+        self.pages.insert(route.clone(), page.clone());
+        page
     }
 
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
@@ -187,6 +213,7 @@ impl Lilac {
 impl Render for Lilac {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = app::session(cx).read(cx).status.clone();
+        let route = app::nav(cx).read(cx).current().clone();
         let (immersive, sidebar_collapsed, panel) = {
             let ui = app::ui(cx);
             let ui = ui.read(cx);
@@ -197,6 +224,7 @@ impl Render for Lilac {
             Status::Starting => self.splash().into_any_element(),
             Status::LoggedOut | Status::WaitingForBrowser => self.login.clone().into_any_element(),
             Status::LoggedIn => {
+                let page = self.page(&route, window, cx);
                 let layout =
                     Layout::compute(window.viewport_size().width, sidebar_collapsed, panel);
                 let sidebar_width = layout.sidebar;
@@ -235,11 +263,7 @@ impl Render for Lilac {
                                     .min_w_0()
                                     .h_full()
                                     .overflow_hidden()
-                                    .child(ui::empty_state(
-                                        icons::MUSIC,
-                                        "Nothing here yet",
-                                        "Pages are on their way.",
-                                    )),
+                                    .child(page.cached(StyleRefinement::default().size_full())),
                             ),
                     )
                     .child(cached(

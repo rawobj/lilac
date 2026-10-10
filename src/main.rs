@@ -7,6 +7,7 @@ mod library;
 mod menus;
 mod model;
 mod nav;
+mod pages;
 mod paths;
 mod player;
 mod runtime;
