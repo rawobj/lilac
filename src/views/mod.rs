@@ -13,6 +13,7 @@ use gpui_kit::*;
 use crate::app;
 use crate::keys::{Dismiss, FocusSearch};
 use crate::nav::Route;
+use crate::panels::RightPanelView;
 use crate::session::Status;
 use crate::theme;
 use crate::ui::{self, icons};
@@ -91,6 +92,7 @@ pub struct Lilac {
     top_bar: Entity<TopBar>,
     sidebar: Entity<Sidebar>,
     player_bar: Entity<PlayerBar>,
+    right_panel: Entity<RightPanelView>,
     /// Pages for every route still in the history, so going back is instant.
     pages: HashMap<Route, AnyView>,
 }
@@ -130,6 +132,7 @@ impl Lilac {
             top_bar: cx.new(|cx| TopBar::new(window, cx)),
             sidebar: cx.new(|cx| Sidebar::new(window, cx)),
             player_bar: cx.new(PlayerBar::new),
+            right_panel: cx.new(RightPanelView::new),
             pages: HashMap::new(),
         }
     }
@@ -264,7 +267,20 @@ impl Render for Lilac {
                                     .h_full()
                                     .overflow_hidden()
                                     .child(page.cached(StyleRefinement::default().size_full())),
-                            ),
+                            )
+                            .when(layout.panel, |row| {
+                                row.child(
+                                    theme::glass()
+                                        .flex_none()
+                                        .w(px(theme::RIGHT_PANEL_WIDTH))
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(cached(
+                                            &self.right_panel,
+                                            StyleRefinement::default().size_full(),
+                                        )),
+                                )
+                            }),
                     )
                     .child(cached(
                         &self.player_bar,
