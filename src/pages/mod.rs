@@ -2,6 +2,7 @@
 
 mod collection;
 mod home;
+mod search;
 
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
@@ -20,6 +21,8 @@ use collection::{CollectionPage, Source};
 pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
     match route.clone() {
         Route::Home => cx.new(home::HomePage::new).into(),
+        Route::Search => cx.new(|cx| search::SearchPage::new(None, cx)).into(),
+        Route::Genre(name) => cx.new(|cx| search::SearchPage::new(Some(name), cx)).into(),
         Route::Liked => cx.new(|cx| CollectionPage::new(Source::Liked, cx)).into(),
         Route::Playlist(id) => cx
             .new(|cx| CollectionPage::new(Source::Playlist(id), cx))
