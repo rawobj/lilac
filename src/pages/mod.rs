@@ -4,6 +4,7 @@ mod artist;
 mod collection;
 mod home;
 mod search;
+mod show;
 
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
@@ -32,6 +33,7 @@ pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
             .new(|cx| CollectionPage::new(Source::Album(id), cx))
             .into(),
         Route::Artist(id) => cx.new(|cx| artist::ArtistPage::new(id, cx)).into(),
+        Route::Show(id) => cx.new(|cx| show::ShowPage::new(id, cx)).into(),
         _ => cx.new(|_| ComingSoon).into(),
     }
 }
