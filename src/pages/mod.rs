@@ -3,6 +3,7 @@
 mod artist;
 mod collection;
 mod home;
+pub mod immersive;
 mod lyrics;
 mod profile;
 mod search;

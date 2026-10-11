@@ -272,6 +272,9 @@ impl Render for Lilac {
         let content = match status {
             Status::Starting => self.splash().into_any_element(),
             Status::LoggedOut | Status::WaitingForBrowser => self.login.clone().into_any_element(),
+            Status::LoggedIn if immersive => {
+                crate::pages::immersive::render(window, cx).into_any_element()
+            }
             Status::LoggedIn => {
                 let page = self.page(&route, window, cx);
                 let layout =
