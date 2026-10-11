@@ -51,10 +51,25 @@ impl Session {
             error: None,
             login: None,
         };
-        if has_credentials {
+        if std::env::args().any(|arg| arg == "--demo") {
+            this.status = Status::Starting;
+            this.enter_demo(cx);
+        } else if has_credentials {
             this.fetch_profile(cx);
         }
         this
+    }
+
+    pub fn is_demo(&self) -> bool {
+        self.api.is_demo()
+    }
+
+    /// Browse a bundled sample library without an account. Nothing is played.
+    pub fn enter_demo(&mut self, cx: &mut Context<Self>) {
+        self.login = None;
+        self.error = None;
+        self.api = Api::demo();
+        self.fetch_profile(cx);
     }
 
     /// Start the browser login.
@@ -89,9 +104,14 @@ impl Session {
     }
 
     pub fn logout(&mut self, cx: &mut Context<Self>) {
-        Credentials::forget();
-        let auth = self.api.auth.clone();
-        runtime::spawn(async move { auth.set(None).await });
+        if self.is_demo() {
+            // Leaving the demo must not touch a real stored login.
+            self.api = Api::new(Arc::new(Auth::new(Credentials::load())));
+        } else {
+            Credentials::forget();
+            let auth = self.api.auth.clone();
+            runtime::spawn(async move { auth.set(None).await });
+        }
         self.user = None;
         self.login = None;
         self.status = Status::LoggedOut;

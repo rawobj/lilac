@@ -92,11 +92,24 @@ impl Auth {
 #[derive(Clone)]
 pub struct Api {
     pub auth: Arc<Auth>,
+    /// Serve everything from the bundled demo catalog instead of the network.
+    demo: bool,
 }
 
 impl Api {
     pub fn new(auth: Arc<Auth>) -> Self {
-        Self { auth }
+        Self { auth, demo: false }
+    }
+
+    pub fn demo() -> Self {
+        Self {
+            auth: Arc::new(Auth::new(None)),
+            demo: true,
+        }
+    }
+
+    pub fn is_demo(&self) -> bool {
+        self.demo
     }
 
     pub(super) async fn send(
@@ -105,6 +118,20 @@ impl Api {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Option<String>> {
+        if self.demo {
+            if method != Method::GET {
+                return Ok(None);
+            }
+            return match super::demo::get(path) {
+                Some(value) => Ok(Some(value.to_string())),
+                None => Err(ApiError {
+                    status: 404,
+                    message: "not in the demo catalog".into(),
+                }
+                .into()),
+            };
+        }
+
         let url = if path.starts_with("http") {
             path.to_string()
         } else {

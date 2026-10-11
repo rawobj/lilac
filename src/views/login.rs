@@ -41,16 +41,34 @@ impl Render for LoginView {
                     move |_, _, cx| session.update(cx, |s, cx| s.cancel_login(cx))
                 }))
         } else {
-            div().flex().flex_col().items_center().gap_3().child(
-                ui::pill_button("login", "Log in with Spotify", true)
-                    .h(px(44.0))
-                    .px_8()
-                    .text_base()
-                    .on_click({
-                        let session = session.clone();
-                        move |_, _, cx| session.update(cx, |s, cx| s.login(cx))
-                    }),
-            )
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .child(
+                    ui::pill_button("login", "Log in with Spotify", true)
+                        .h(px(44.0))
+                        .px_8()
+                        .text_base()
+                        .on_click({
+                            let session = session.clone();
+                            move |_, _, cx| session.update(cx, |s, cx| s.login(cx))
+                        }),
+                )
+                .child(
+                    div()
+                        .id("demo")
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::accent_soft()))
+                        .child("or explore the demo library")
+                        .on_click({
+                            let session = session.clone();
+                            move |_, _, cx| session.update(cx, |s, cx| s.enter_demo(cx))
+                        }),
+                )
         };
 
         div()

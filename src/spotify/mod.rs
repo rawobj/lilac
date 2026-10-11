@@ -1,6 +1,7 @@
 //! Everything that talks to Spotify.
 
 pub mod api;
+pub mod demo;
 pub mod lyrics;
 pub mod oauth;
 
