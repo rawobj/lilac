@@ -6,6 +6,7 @@ mod home;
 mod lyrics;
 mod profile;
 mod search;
+mod settings;
 mod show;
 
 use gpui_kit::component::scroll::Scrollbar;
@@ -38,20 +39,7 @@ pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         Route::Show(id) => cx.new(|cx| show::ShowPage::new(id, cx)).into(),
         Route::Profile => cx.new(profile::ProfilePage::new).into(),
         Route::Lyrics => cx.new(lyrics::LyricsPage::new).into(),
-        _ => cx.new(|_| ComingSoon).into(),
-    }
-}
-
-/// Stand-in for routes whose page does not exist yet.
-struct ComingSoon;
-
-impl Render for ComingSoon {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        crate::ui::empty_state(
-            crate::ui::icons::MUSIC,
-            "Coming soon",
-            "This page is not built yet.",
-        )
+        Route::Settings => cx.new(|cx| settings::SettingsPage::new(window, cx)).into(),
     }
 }
 
