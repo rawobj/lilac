@@ -28,6 +28,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
+            theme::init_fonts(cx);
             images::ImageCache::init(cx);
             app::AppState::init(cx);
             keys::init(cx);

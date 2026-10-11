@@ -104,6 +104,26 @@ pub const TOP_BAR_HEIGHT: f32 = 56.0;
 
 pub const FONT_UI: &str = "Inter";
 
+/// Static Inter weights, bundled so text looks the same on every system and
+/// weights resolve even where only variable fonts are installed.
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/Inter-Regular.otf"),
+    include_bytes!("../assets/fonts/Inter-Medium.otf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
+    include_bytes!("../assets/fonts/Inter-Bold.otf"),
+    include_bytes!("../assets/fonts/Inter-ExtraBold.otf"),
+];
+
+pub fn init_fonts(cx: &App) {
+    let fonts = FONTS
+        .iter()
+        .map(|bytes| std::borrow::Cow::Borrowed(*bytes))
+        .collect();
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        eprintln!("lilac: could not load bundled fonts: {err}");
+    }
+}
+
 /// A frosted panel: translucent fill, hairline border, soft inner highlight.
 pub fn glass() -> Div {
     div()
