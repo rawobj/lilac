@@ -18,6 +18,7 @@ use crate::model::User;
 
 mod catalog;
 mod library;
+mod playback;
 
 const BASE: &str = "https://api.spotify.com/v1";
 const MAX_RETRIES: u32 = 3;
