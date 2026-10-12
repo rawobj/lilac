@@ -592,7 +592,13 @@ impl Render for CollectionPage {
             .child(
                 list(
                     self.list.clone(),
-                    cx.processor(|this, ix: usize, window, cx| this.render_item(ix, window, cx)),
+                    cx.processor(|this, ix: usize, window, cx| {
+                        // List items are sized to their content unless told otherwise.
+                        div()
+                            .w_full()
+                            .child(this.render_item(ix, window, cx))
+                            .into_any_element()
+                    }),
                 )
                 .size_full(),
             )

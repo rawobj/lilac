@@ -517,7 +517,11 @@ impl Render for Sidebar {
                 count,
                 cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
-                        .map(|ix| this.render_entry(ix, collapsed, window, cx))
+                        .map(|ix| {
+                            div()
+                                .w_full()
+                                .child(this.render_entry(ix, collapsed, window, cx))
+                        })
                         .collect::<Vec<_>>()
                 }),
             )
