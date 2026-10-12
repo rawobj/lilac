@@ -18,6 +18,37 @@ pub enum Route {
     Settings,
 }
 
+impl Route {
+    /// Parse a `spotify:` URI or an `open.spotify.com` link.
+    pub fn from_link(link: &str) -> Option<Route> {
+        let link = link.trim();
+        let (kind, id) = if let Some(rest) = link.strip_prefix("spotify:") {
+            let mut parts = rest.split(':');
+            (parts.next()?, parts.next().unwrap_or(""))
+        } else {
+            let rest = link
+                .strip_prefix("https://open.spotify.com/")
+                .or_else(|| link.strip_prefix("http://open.spotify.com/"))?;
+            let path = rest.split(['?', '#']).next()?;
+            // Localized links look like /intl-de/album/<id>.
+            let mut parts = path
+                .split('/')
+                .filter(|p| !p.is_empty() && !p.starts_with("intl-"));
+            (parts.next()?, parts.next().unwrap_or(""))
+        };
+        let id = || (!id.is_empty()).then(|| SharedString::from(id.to_string()));
+        Some(match kind {
+            "album" => Route::Album(id()?),
+            "playlist" => Route::Playlist(id()?),
+            "artist" => Route::Artist(id()?),
+            "show" => Route::Show(id()?),
+            "collection" => Route::Liked,
+            "search" => Route::Search,
+            _ => return None,
+        })
+    }
+}
+
 const MAX_HISTORY: usize = 64;
 
 pub struct Nav {
@@ -122,6 +153,25 @@ mod tests {
             nav.retained(),
             &[Route::Home, Route::Search, Route::Settings]
         );
+    }
+
+    #[test]
+    fn links_parse_into_routes() {
+        assert_eq!(
+            Route::from_link("spotify:album:abc"),
+            Some(Route::Album("abc".into()))
+        );
+        assert_eq!(
+            Route::from_link("https://open.spotify.com/playlist/37i9?si=xyz"),
+            Some(Route::Playlist("37i9".into()))
+        );
+        assert_eq!(
+            Route::from_link("https://open.spotify.com/intl-de/artist/4Z8W"),
+            Some(Route::Artist("4Z8W".into()))
+        );
+        assert_eq!(Route::from_link("spotify:collection"), Some(Route::Liked));
+        assert_eq!(Route::from_link("spotify:album:"), None);
+        assert_eq!(Route::from_link("https://example.com/album/abc"), None);
     }
 
     #[test]

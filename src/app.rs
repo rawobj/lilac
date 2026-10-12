@@ -39,6 +39,14 @@ impl AppState {
 
         let search = cx.new(|_| Search::default());
 
+        // `lilac spotify:album:…` or an open.spotify.com link opens that page directly.
+        if let Some(route) = std::env::args()
+            .skip(1)
+            .find_map(|arg| Route::from_link(&arg))
+        {
+            nav.update(cx, |nav, cx| nav.go(route, cx));
+        }
+
         cx.set_global(AppState {
             session,
             library,
