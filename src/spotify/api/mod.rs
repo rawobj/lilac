@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::http;
-use super::oauth::{self, Credentials};
+use super::oauth::{self, Client, Credentials};
 use crate::model::User;
 
 mod catalog;
@@ -48,24 +48,28 @@ pub(super) fn is_unsupported(err: &anyhow::Error) -> bool {
     matches!(status_of(err), Some(400 | 403 | 404 | 405 | 410))
 }
 
-/// Holds the OAuth credentials and refreshes them on demand.
+/// Holds one client's OAuth credentials and refreshes them on demand.
 pub struct Auth {
+    pub client: Client,
     credentials: Mutex<Option<Credentials>>,
 }
 
 impl Auth {
-    pub fn new(credentials: Option<Credentials>) -> Self {
+    /// Starts with whatever this client has stored.
+    pub fn load(client: Client) -> Self {
+        let credentials = Credentials::load(&client);
         Self {
+            client,
             credentials: Mutex::new(credentials),
         }
     }
 
-    pub async fn set(&self, credentials: Option<Credentials>) {
-        *self.credentials.lock().await = credentials;
+    pub fn has_credentials(&self) -> bool {
+        self.credentials.try_lock().is_ok_and(|c| c.is_some())
     }
 
-    pub async fn is_logged_in(&self) -> bool {
-        self.credentials.lock().await.is_some()
+    pub async fn set(&self, credentials: Option<Credentials>) {
+        *self.credentials.lock().await = credentials;
     }
 
     /// A valid access token, refreshing first if the current one is about to expire.
@@ -75,8 +79,8 @@ impl Auth {
         if !current.expired() {
             return Ok(current.access_token.clone());
         }
-        let fresh = oauth::refresh(&current.refresh_token).await?;
-        let _ = fresh.save();
+        let fresh = oauth::refresh(&self.client, &current.refresh_token).await?;
+        let _ = fresh.save(&self.client);
         let token = fresh.access_token.clone();
         *guard = Some(fresh);
         Ok(token)
@@ -104,7 +108,10 @@ impl Api {
 
     pub fn demo() -> Self {
         Self {
-            auth: Arc::new(Auth::new(None)),
+            auth: Arc::new(Auth {
+                client: Client::web(),
+                credentials: Mutex::new(None),
+            }),
             demo: true,
         }
     }

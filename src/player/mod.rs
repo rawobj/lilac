@@ -1,5 +1,6 @@
 //! Playback state: what is playing, where in the track we are, and what comes next.
 
+mod backend;
 pub mod queue;
 
 use std::time::{Duration, Instant};

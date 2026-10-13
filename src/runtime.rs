@@ -14,6 +14,10 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 pub fn rt() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
+        // reqwest and librespot share one rustls; with no default provider
+        // rustls cannot choose and librespot's HTTP client panics. Every TLS
+        // connection starts on this runtime, so installing it here is early enough.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Builder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(4)

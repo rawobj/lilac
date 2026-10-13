@@ -7,7 +7,7 @@ use gpui_kit::*;
 use crate::model::User;
 use crate::runtime;
 use crate::spotify::api::{Api, Auth, status_of};
-use crate::spotify::oauth::{self, Credentials};
+use crate::spotify::oauth::{self, Client, Credentials};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -27,7 +27,12 @@ pub enum SessionEvent {
 
 pub struct Session {
     pub status: Status,
+    /// Web API access through lilac's own client.
     pub api: Api,
+    /// Tokens of the desktop client for the streaming session.
+    pub streaming: Arc<Auth>,
+    /// What the browser is being asked for during the two-step login.
+    pub login_step: Option<SharedString>,
     pub user: Option<User>,
     pub error: Option<SharedString>,
     login: Option<Task<()>>,
@@ -37,9 +42,9 @@ impl EventEmitter<SessionEvent> for Session {}
 
 impl Session {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let credentials = Credentials::load();
-        let has_credentials = credentials.is_some();
-        let api = Api::new(Arc::new(Auth::new(credentials)));
+        let (web, streaming) = auths();
+        let has_credentials = web.has_credentials() && streaming.has_credentials();
+        let api = Api::new(web);
         let mut this = Self {
             status: if has_credentials {
                 Status::Starting
@@ -47,6 +52,8 @@ impl Session {
                 Status::LoggedOut
             },
             api,
+            streaming,
+            login_step: None,
             user: None,
             error: None,
             login: None,
@@ -72,25 +79,53 @@ impl Session {
         self.fetch_profile(cx);
     }
 
-    /// Start the browser login.
+    /// Start the browser login: the desktop client for streaming, then
+    /// lilac's own client for the Web API.
     pub fn login(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.status = Status::WaitingForBrowser;
+        self.login_step = Some("Step 1 of 2: allow playback".into());
         cx.notify();
 
-        let auth = self.api.auth.clone();
+        let web = self.api.auth.clone();
+        let streaming = self.streaming.clone();
         self.login = Some(cx.spawn(async move |this, cx| {
             let result = runtime::run(async move {
-                let credentials = oauth::login().await?;
-                credentials.save()?;
-                auth.set(Some(credentials)).await;
+                let credentials = oauth::login(&streaming.client).await?;
+                credentials.save(&streaming.client)?;
+                streaming.set(Some(credentials)).await;
+                Ok(())
+            })
+            .await;
+            let next = this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    this.login_step = Some("Step 2 of 2: allow access to your library".into());
+                    cx.notify();
+                    true
+                }
+                Err(err) => {
+                    this.fail(err, cx);
+                    false
+                }
+            });
+            if !matches!(next, Ok(true)) {
+                return;
+            }
+
+            let result = runtime::run(async move {
+                let credentials = oauth::login(&web.client).await?;
+                credentials.save(&web.client)?;
+                web.set(Some(credentials)).await;
                 Ok(())
             })
             .await;
 
-            this.update(cx, |this, cx| match result {
-                Ok(()) => this.fetch_profile(cx),
-                Err(err) => this.fail(err, cx),
+            this.update(cx, |this, cx| {
+                this.login_step = None;
+                match result {
+                    Ok(()) => this.fetch_profile(cx),
+                    Err(err) => this.fail(err, cx),
+                }
             })
             .ok();
         }));
@@ -98,6 +133,7 @@ impl Session {
 
     pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
         self.login = None;
+        self.login_step = None;
         oauth::cancel_login();
         self.status = Status::LoggedOut;
         cx.notify();
@@ -106,11 +142,16 @@ impl Session {
     pub fn logout(&mut self, cx: &mut Context<Self>) {
         if self.is_demo() {
             // Leaving the demo must not touch a real stored login.
-            self.api = Api::new(Arc::new(Auth::new(Credentials::load())));
+            let (web, streaming) = auths();
+            self.api = Api::new(web);
+            self.streaming = streaming;
         } else {
-            Credentials::forget();
-            let auth = self.api.auth.clone();
-            runtime::spawn(async move { auth.set(None).await });
+            Credentials::forget_all();
+            let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());
+            runtime::spawn(async move {
+                web.set(None).await;
+                streaming.set(None).await;
+            });
         }
         self.user = None;
         self.login = None;
@@ -140,7 +181,7 @@ impl Session {
                 Err(err) => {
                     // Only a rejected token means the login is gone. Being offline does not.
                     if matches!(status_of(&err), Some(400 | 401 | 403)) {
-                        Credentials::forget();
+                        Credentials::forget_all();
                     }
                     this.fail(err, cx);
                 }
@@ -149,4 +190,12 @@ impl Session {
         })
         .detach();
     }
+}
+
+/// Auth for the Web API and for streaming, from whatever is stored.
+fn auths() -> (Arc<Auth>, Arc<Auth>) {
+    (
+        Arc::new(Auth::load(Client::web())),
+        Arc::new(Auth::load(Client::streaming())),
+    )
 }

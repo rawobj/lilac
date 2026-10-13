@@ -12,9 +12,13 @@ pub struct LoginView;
 impl Render for LoginView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = app::session(cx);
-        let (status, error) = {
+        let (status, error, step) = {
             let session = session.read(cx);
-            (session.status.clone(), session.error.clone())
+            (
+                session.status.clone(),
+                session.error.clone(),
+                session.login_step.clone(),
+            )
         };
         let waiting = status == Status::WaitingForBrowser;
 
@@ -32,8 +36,16 @@ impl Render for LoginView {
                         .child(ui::spinner(18.0))
                         .child(
                             div()
-                                .text_color(theme::text_muted())
-                                .child("Waiting for you to finish in the browser…"),
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_color(theme::text_muted())
+                                        .child("Waiting for you to finish in the browser…"),
+                                )
+                                .children(step.map(|step| {
+                                    div().text_xs().text_color(theme::text_subtle()).child(step)
+                                })),
                         ),
                 )
                 .child(ui::pill_button("cancel", "Cancel", false).on_click({

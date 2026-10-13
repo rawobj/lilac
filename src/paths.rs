@@ -45,6 +45,11 @@ pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.json")
 }
 
+/// Tokens of the desktop client, which the streaming session needs.
+pub fn streaming_credentials_file() -> PathBuf {
+    config_dir().join("streaming-credentials.json")
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }
