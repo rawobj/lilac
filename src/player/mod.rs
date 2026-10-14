@@ -9,13 +9,17 @@ use gpui_kit::*;
 
 use crate::app;
 use crate::model::{ContextUri, Track};
+use crate::runtime;
 use crate::session::{Session, SessionEvent};
 use crate::settings::Settings;
 
+use backend::{Backend, EngineEvent, Options};
 pub use queue::{Queue, Repeat};
 
 /// Restart the current track instead of going to the previous one past this point.
 const RESTART_THRESHOLD_MS: u32 = 3000;
+/// Give up skipping after this many unavailable tracks in a row.
+const MAX_UNAVAILABLE_STREAK: u32 = 5;
 
 pub enum PlayerEvent {
     /// A different track became current.
@@ -37,6 +41,15 @@ pub struct Player {
     anchor_ms: u32,
     anchor_at: Instant,
     ticker: Option<Task<()>>,
+    backend: Option<Backend>,
+    /// The streaming session is being set up.
+    starting: Option<Task<()>>,
+    /// A load requested before the session was ready: (uri, position, play).
+    pending: Option<(SharedString, u32, bool)>,
+    events: Option<Task<()>>,
+    /// librespot asked for the next track; later queue edits re-preload.
+    preload_due: bool,
+    unavailable_streak: u32,
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
@@ -46,6 +59,7 @@ impl Player {
         cx.subscribe(session, |this, _, event, cx| {
             if let SessionEvent::LoggedOut = event {
                 this.stop(cx);
+                this.drop_backend();
             }
         })
         .detach();
@@ -61,6 +75,12 @@ impl Player {
             anchor_ms: 0,
             anchor_at: Instant::now(),
             ticker: None,
+            backend: None,
+            starting: None,
+            pending: None,
+            events: None,
+            preload_due: false,
+            unavailable_streak: 0,
         }
     }
 
@@ -388,7 +408,7 @@ impl Player {
 
     /// Without an audio backend the clock alone decides when a track is over.
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
-        if !self.simulated() {
+        if !self.simulated(cx) {
             self.ticker = None;
             return;
         }
@@ -417,28 +437,238 @@ impl Player {
 
     // ------------------------------------------------------------------ backend
     //
-    // Hooks where an audio backend plugs in. Until one is attached, playback
-    // is simulated by the clock above.
+    // librespot does the audio. In demo mode there is no account to stream
+    // with, so playback is simulated by the clock above.
 
-    fn simulated(&self) -> bool {
-        true
+    fn simulated(&self, cx: &App) -> bool {
+        app::session(cx).read(cx).is_demo()
     }
 
-    fn backend_start(&mut self, _track: &Track, _position_ms: u32, _cx: &mut Context<Self>) {}
+    fn backend(&self) -> Option<&Backend> {
+        self.backend.as_ref().filter(|b| b.is_usable())
+    }
 
-    fn backend_pause(&mut self, _cx: &mut Context<Self>) {}
+    fn drop_backend(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            backend.shutdown();
+        }
+        self.events = None;
+        self.starting = None;
+        self.pending = None;
+    }
 
-    fn backend_resume(&mut self, _cx: &mut Context<Self>) {}
+    /// Connect the streaming session in the background, then run any pending load.
+    fn ensure_backend(&mut self, cx: &mut Context<Self>) {
+        if self.starting.is_some() {
+            return;
+        }
+        let options = Options::from_settings(app::settings(cx).read(cx));
+        let auth = app::session(cx).read(cx).streaming.clone();
+        let volume = self.effective_volume();
+        self.starting = Some(cx.spawn(async move |this, cx| {
+            let result = runtime::run(Backend::start(auth, options, volume)).await;
+            this.update(cx, |this, cx| {
+                this.starting = None;
+                match result {
+                    Ok((backend, mut events)) => {
+                        this.events = Some(cx.spawn(async move |this, cx| {
+                            while let Some(event) = events.recv().await {
+                                if this
+                                    .update(cx, |this, cx| this.on_engine_event(event, cx))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }));
+                        if let Some((uri, position, play)) = this.pending.take() {
+                            if let Err(err) = backend.load(&uri, play, position) {
+                                app::toast_error(format!("{err:#}"), cx);
+                            }
+                        }
+                        this.backend = Some(backend);
+                    }
+                    Err(err) => {
+                        this.pending = None;
+                        this.loading = false;
+                        this.playing = false;
+                        this.anchor_at = Instant::now();
+                        app::toast_error(format!("{err:#}"), cx);
+                        cx.emit(PlayerEvent::StateChanged);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
 
-    fn backend_stop(&mut self, _cx: &mut Context<Self>) {}
+    fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
+        let is_current = |this: &Self, uri: &librespot_core::spotify_uri::SpotifyUri| {
+            backend::event_uri(uri)
+                .is_some_and(|uri| this.current.as_ref().is_some_and(|t| t.uri.as_ref() == uri))
+        };
+        match event {
+            EngineEvent::Playing {
+                track_id,
+                position_ms,
+                ..
+            } if is_current(self, &track_id) => {
+                self.unavailable_streak = 0;
+                self.loading = false;
+                self.anchor_ms = position_ms;
+                self.anchor_at = Instant::now();
+                cx.emit(PlayerEvent::StateChanged);
+                cx.notify();
+            }
+            EngineEvent::Paused {
+                track_id,
+                position_ms,
+                ..
+            } if is_current(self, &track_id) => {
+                self.loading = false;
+                self.anchor_ms = position_ms;
+                self.anchor_at = Instant::now();
+                cx.notify();
+            }
+            EngineEvent::Seeked {
+                track_id,
+                position_ms,
+                ..
+            }
+            | EngineEvent::PositionCorrection {
+                track_id,
+                position_ms,
+                ..
+            } if is_current(self, &track_id) => {
+                self.anchor_ms = position_ms;
+                self.anchor_at = Instant::now();
+                cx.notify();
+            }
+            EngineEvent::EndOfTrack { track_id, .. } if is_current(self, &track_id) => {
+                self.track_ended(cx);
+            }
+            EngineEvent::Unavailable { track_id, .. } if is_current(self, &track_id) => {
+                let name = self
+                    .current
+                    .as_ref()
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                app::toast_error(format!("\u{201c}{name}\u{201d} isn't available"), cx);
+                self.unavailable_streak += 1;
+                if self.unavailable_streak < MAX_UNAVAILABLE_STREAK {
+                    self.next(cx);
+                } else {
+                    self.unavailable_streak = 0;
+                    self.finish(cx);
+                }
+            }
+            EngineEvent::TimeToPreloadNextTrack { track_id, .. } if is_current(self, &track_id) => {
+                self.preload_due = true;
+                self.backend_preload(cx);
+            }
+            _ => {}
+        }
+    }
 
-    fn backend_seek(&mut self, _position_ms: u32, _cx: &mut Context<Self>) {}
+    fn backend_start(&mut self, track: &Track, position_ms: u32, cx: &mut Context<Self>) {
+        if self.simulated(cx) {
+            return;
+        }
+        self.loading = true;
+        self.preload_due = false;
+        // Quality, normalisation and gapless are fixed per librespot player.
+        let options = Options::from_settings(app::settings(cx).read(cx));
+        if self
+            .backend
+            .as_ref()
+            .is_some_and(|b| b.options != options || !b.is_usable())
+        {
+            self.drop_backend();
+        }
+        match self.backend() {
+            Some(backend) => {
+                if let Err(err) = backend.load(&track.uri, true, position_ms) {
+                    app::toast_error(format!("{err:#}"), cx);
+                }
+            }
+            None => {
+                self.pending = Some((track.uri.clone(), position_ms, true));
+                self.ensure_backend(cx);
+            }
+        }
+    }
 
-    fn backend_volume(&mut self, _cx: &mut Context<Self>) {}
+    fn backend_pause(&mut self, _cx: &mut Context<Self>) {
+        match self.backend() {
+            Some(backend) => backend.pause(),
+            None => {
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.2 = false;
+                }
+            }
+        }
+    }
+
+    fn backend_resume(&mut self, cx: &mut Context<Self>) {
+        if self.simulated(cx) {
+            return;
+        }
+        match self.backend() {
+            Some(backend) => backend.play(),
+            None => {
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.2 = true;
+                } else if let Some(track) = self.current.clone() {
+                    // The session dropped while paused: pick up where we were.
+                    let position = self.anchor_ms;
+                    self.backend_start(&track, position, cx);
+                }
+            }
+        }
+    }
+
+    fn backend_stop(&mut self, _cx: &mut Context<Self>) {
+        self.pending = None;
+        if let Some(backend) = self.backend() {
+            backend.stop();
+        }
+    }
+
+    fn backend_seek(&mut self, position_ms: u32, _cx: &mut Context<Self>) {
+        match self.backend() {
+            Some(backend) => backend.seek(position_ms),
+            None => {
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.1 = position_ms;
+                }
+            }
+        }
+    }
+
+    fn backend_volume(&mut self, _cx: &mut Context<Self>) {
+        if let Some(backend) = self.backend() {
+            backend.set_volume(self.effective_volume());
+        }
+    }
 
     fn backend_modes(&mut self, _cx: &mut Context<Self>) {}
 
     fn backend_enqueue(&mut self, _track: &Track, _cx: &mut Context<Self>) {}
 
-    fn backend_preload(&mut self, _cx: &mut Context<Self>) {}
+    /// Hand librespot the track that will follow, once it has asked for one.
+    fn backend_preload(&mut self, _cx: &mut Context<Self>) {
+        if !self.preload_due {
+            return;
+        }
+        let repeat = self.repeat;
+        let next = if repeat == Repeat::Track {
+            self.current.clone()
+        } else {
+            self.queue.peek(repeat).filter(|t| t.playable()).cloned()
+        };
+        if let (Some(backend), Some(next)) = (self.backend(), next) {
+            let _ = backend.preload(&next.uri);
+        }
+    }
 }
