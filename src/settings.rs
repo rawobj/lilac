@@ -37,6 +37,8 @@ pub struct Settings {
     pub media_keys: bool,
     /// Look up lyrics on lrclib.net when Spotify has none. Sends title and artist there.
     pub lrclib_lyrics: bool,
+    /// Release date of the newest What's New item the user has seen.
+    pub whats_new_seen: String,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             reduce_transparency: false,
             media_keys: true,
             lrclib_lyrics: false,
+            whats_new_seen: String::new(),
         }
     }
 }

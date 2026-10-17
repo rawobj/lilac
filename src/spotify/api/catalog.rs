@@ -78,6 +78,17 @@ impl Api {
         Ok(out)
     }
 
+    /// An artist's newest albums and singles, one page only. Used by the
+    /// What's New feed, where the full discography would be wasted requests.
+    pub async fn latest_releases(&self, id: &str) -> Result<Vec<Album>> {
+        let page: Page<Album> = self
+            .get(&format!(
+                "/artists/{id}/albums?include_groups=album,single&limit=10&offset=0"
+            ))
+            .await?;
+        Ok(page.items)
+    }
+
     /// An artist's most popular tracks.
     ///
     /// The dedicated endpoint was retired for third-party apps, so when it is

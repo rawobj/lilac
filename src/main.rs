@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod assets;
+mod feed;
 mod images;
 mod keys;
 mod library;

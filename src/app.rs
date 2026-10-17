@@ -5,6 +5,7 @@
 
 use gpui_kit::*;
 
+use crate::feed::Feed;
 use crate::library::Library;
 use crate::nav::{Nav, Route};
 use crate::player::Player;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub ui: Entity<UiState>,
     pub search: Entity<Search>,
     pub settings: Entity<Settings>,
+    pub feed: Entity<Feed>,
 }
 
 impl Global for AppState {}
@@ -38,6 +40,7 @@ impl AppState {
         let player = cx.new(|cx| Player::new(&session, &stored, cx));
 
         let search = cx.new(|_| Search::default());
+        let feed = cx.new(|cx| Feed::new(&session, cx));
 
         // `lilac spotify:album:…` or an open.spotify.com link opens that page directly.
         if let Some(route) = std::env::args()
@@ -55,6 +58,7 @@ impl AppState {
             ui,
             search,
             settings,
+            feed,
         });
     }
 }
@@ -85,6 +89,10 @@ pub fn search(cx: &App) -> Entity<Search> {
 
 pub fn settings(cx: &App) -> Entity<Settings> {
     cx.global::<AppState>().settings.clone()
+}
+
+pub fn feed(cx: &App) -> Entity<Feed> {
+    cx.global::<AppState>().feed.clone()
 }
 
 pub fn api(cx: &App) -> Api {
