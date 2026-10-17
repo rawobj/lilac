@@ -263,6 +263,50 @@ fn index(id: &str, prefix: &str) -> usize {
 }
 
 /// Answer a GET. `None` means the demo backend has nothing at this path.
+/// Sample friend activity: a few people, some listening right now.
+pub fn friends() -> Vec<super::buddylist::Friend> {
+    const PEOPLE: &[&str] = &["Maya", "Jonas", "Priya", "Theo", "Lena", "Sam"];
+    // Minutes since each friend's last play.
+    const AGO: &[u64] = &[0, 2, 14, 47, 180, 1500];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    PEOPLE
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let n = (i * 5 + 1) % album_count();
+            let a = n / ALBUMS_PER_ARTIST;
+            let t = i % TRACKS_PER_ALBUM;
+            let (context, context_uri) = if i % 2 == 0 {
+                let p = i % PLAYLISTS.len();
+                (
+                    PLAYLISTS[p].0.to_string(),
+                    format!("spotify:playlist:pl{p}"),
+                )
+            } else {
+                (
+                    ALBUM_WORDS[n % ALBUM_WORDS.len()].to_string(),
+                    format!("spotify:album:al{n}"),
+                )
+            };
+            super::buddylist::Friend {
+                name: name.to_string(),
+                user_uri: format!("spotify:user:friend{i}"),
+                image: None,
+                track: TRACK_WORDS[(n * 7 + t * 3) % TRACK_WORDS.len()].to_string(),
+                track_uri: format!("spotify:track:tr{n}x{t}"),
+                artist: ARTISTS[a % ARTISTS.len()].0.to_string(),
+                artist_uri: format!("spotify:artist:ar{a}"),
+                context,
+                context_uri,
+                timestamp_ms: now.saturating_sub(AGO[i] * 60_000),
+            }
+        })
+        .collect()
+}
+
 pub fn get(path: &str) -> Option<Value> {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
