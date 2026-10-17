@@ -9,6 +9,7 @@ mod profile;
 mod search;
 mod settings;
 mod show;
+mod whats_new;
 
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
@@ -39,6 +40,7 @@ pub fn build(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         Route::Artist(id) => cx.new(|cx| artist::ArtistPage::new(id, cx)).into(),
         Route::Show(id) => cx.new(|cx| show::ShowPage::new(id, cx)).into(),
         Route::Profile => cx.new(profile::ProfilePage::new).into(),
+        Route::WhatsNew => cx.new(whats_new::WhatsNewPage::new).into(),
         Route::Lyrics => cx.new(lyrics::LyricsPage::new).into(),
         Route::Settings => cx.new(|cx| settings::SettingsPage::new(window, cx)).into(),
     }

@@ -35,6 +35,9 @@ impl TopBar {
         cx.observe(&app::nav(cx), |_, _, cx| cx.notify()).detach();
         cx.observe(&app::session(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&app::feed(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&app::settings(cx), |_, _, cx| cx.notify())
+            .detach();
 
         Self { search }
     }
@@ -117,6 +120,11 @@ impl Render for TopBar {
         let user = app::session(cx).read(cx).user.clone();
         let avatar = user.as_ref().and_then(|u| u.images.for_size(32));
         let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
+        let at_whats_new = *app::nav(cx).read(cx).current() == Route::WhatsNew;
+        let has_new = {
+            let seen = app::settings(cx).read(cx).whats_new_seen.clone();
+            app::feed(cx).read(cx).unseen(&seen) > 0
+        };
 
         div()
             .id("top-bar")
@@ -220,6 +228,32 @@ impl Render for TopBar {
                     .items_center()
                     .justify_end()
                     .gap_2()
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                ui::toggle_icon_button("whats-new", icons::BELL, at_whats_new)
+                                    .tip("What's New")
+                                    .on_mouse_down(MouseButton::Left, no_drag)
+                                    .on_click(|_, _, cx| {
+                                        app::nav(cx)
+                                            .update(cx, |nav, cx| nav.toggle(Route::WhatsNew, cx))
+                                    }),
+                            )
+                            .when(has_new && !at_whats_new, |bell| {
+                                bell.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(6.0))
+                                        .right(px(6.0))
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(theme::pink())
+                                        .border_1()
+                                        .border_color(theme::backdrop_opaque()),
+                                )
+                            }),
+                    )
                     .child(
                         div()
                             .id("account")

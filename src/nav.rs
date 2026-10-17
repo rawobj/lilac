@@ -14,6 +14,7 @@ pub enum Route {
     /// Search results for a browse tile, e.g. a genre.
     Genre(SharedString),
     Profile,
+    WhatsNew,
     Lyrics,
     Settings,
 }
