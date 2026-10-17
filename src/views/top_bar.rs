@@ -8,7 +8,7 @@ use crate::app;
 use crate::nav::Route;
 use crate::theme;
 use crate::ui::{self, Placeholder, WithTooltip, icons};
-use crate::ui_state::{Dialog, MenuItem};
+use crate::ui_state::{Dialog, MenuItem, RightPanel};
 
 pub struct TopBar {
     search: Entity<InputState>,
@@ -36,6 +36,7 @@ impl TopBar {
         cx.observe(&app::session(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&app::feed(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&app::ui(cx), |_, _, cx| cx.notify()).detach();
         cx.observe(&app::settings(cx), |_, _, cx| cx.notify())
             .detach();
 
@@ -121,6 +122,7 @@ impl Render for TopBar {
         let avatar = user.as_ref().and_then(|u| u.images.for_size(32));
         let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
         let at_whats_new = *app::nav(cx).read(cx).current() == Route::WhatsNew;
+        let friends_open = app::ui(cx).read(cx).right_panel == RightPanel::Friends;
         let has_new = {
             let seen = app::settings(cx).read(cx).whats_new_seen.clone();
             app::feed(cx).read(cx).unseen(&seen) > 0
@@ -252,6 +254,15 @@ impl Render for TopBar {
                                         .border_1()
                                         .border_color(theme::backdrop_opaque()),
                                 )
+                            }),
+                    )
+                    .child(
+                        ui::toggle_icon_button("friends", icons::USERS, friends_open)
+                            .tip("Friend Activity")
+                            .on_mouse_down(MouseButton::Left, no_drag)
+                            .on_click(|_, _, cx| {
+                                app::ui(cx)
+                                    .update(cx, |ui, cx| ui.toggle_panel(RightPanel::Friends, cx))
                             }),
                     )
                     .child(

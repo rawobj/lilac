@@ -1,4 +1,4 @@
-//! The right-hand panel: now playing, queue or devices.
+//! The right-hand panel: now playing, queue, devices or friend activity.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,6 +23,8 @@ impl RightPanelView {
         cx.observe(&app::library(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&app::ui(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&app::friends(cx), |_, _, cx| cx.notify())
+            .detach();
         Self {
             scroll: ScrollHandle::new(),
         }
@@ -418,6 +420,189 @@ impl RightPanelView {
     }
 }
 
+impl RightPanelView {
+    fn friends(&self, window: &Window, cx: &mut App) -> Div {
+        use crate::friends::Status;
+        let (list, status) = {
+            let friends = app::friends(cx);
+            let friends = friends.read(cx);
+            (friends.list.clone(), friends.status.clone())
+        };
+        let panel = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(Self::header("Friend Activity"));
+        let empty = |title: &'static str, detail: SharedString| {
+            div()
+                .px_4()
+                .child(ui::empty_state(icons::USERS, title, detail))
+        };
+        match status {
+            Status::Loading if list.is_empty() => panel.child(ui::loading_state()),
+            Status::Unavailable => panel.child(empty(
+                "Friend activity unavailable",
+                "Spotify only shares it with its own apps for this account.".into(),
+            )),
+            Status::Failed(err) => panel.child(empty("Couldn't load friend activity", err)),
+            _ if list.is_empty() => panel.child(empty(
+                "No friend activity yet",
+                "Follow friends on Spotify to see what they play.".into(),
+            )),
+            _ => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let mut rows = div().px_2().flex().flex_col().gap_1();
+                for (ix, friend) in list.iter().enumerate() {
+                    rows = rows.child(friend_row(ix, friend, now, window, cx));
+                }
+                panel.child(
+                    div()
+                        .id("friends-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(rows),
+                )
+            }
+        }
+    }
+}
+
+/// Listening right now, give or take a long track.
+const LIVE_MS: u64 = 10 * 60 * 1000;
+
+fn ago(now_ms: u64, then_ms: u64) -> String {
+    let minutes = now_ms.saturating_sub(then_ms) / 60_000;
+    match minutes {
+        0 => "now".into(),
+        1..=59 => format!("{minutes} min"),
+        60..=1439 => format!("{} hr", minutes / 60),
+        _ => format!("{} d", minutes / 1440),
+    }
+}
+
+fn friend_row(
+    ix: usize,
+    friend: &crate::spotify::buddylist::Friend,
+    now_ms: u64,
+    window: &Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    let live = now_ms.saturating_sub(friend.timestamp_ms) < LIVE_MS;
+    let open_track = friend.track_uri.clone();
+    let open_artist = friend.artist_uri.clone();
+    let open_context = friend.context_uri.clone();
+    let go = |uri: String| {
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            cx.stop_propagation();
+            if let Some(route) = Route::from_link(&uri) {
+                app::navigate(route, cx);
+            }
+        }
+    };
+    div()
+        .id(("friend", ix))
+        .p_2()
+        .flex()
+        .gap_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .hover(|s| s.bg(theme::hover_fill()))
+        .child(div().relative().flex_none().child(ui::cover(
+            friend.image.clone().map(Into::into),
+            40.0,
+            20.0,
+            Placeholder::User,
+            window,
+            cx,
+        )))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(friend.name.clone()),
+                        )
+                        .child(if live {
+                            svg()
+                                .path(icons::AUDIO_LINES)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme::accent())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(theme::text_subtle())
+                                .child(ago(now_ms, friend.timestamp_ms))
+                                .into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(
+                            div()
+                                .id(("friend-track", ix))
+                                .truncate()
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .on_click(go(open_track))
+                                .child(friend.track.clone()),
+                        )
+                        .child(div().flex_none().px_1().child("•"))
+                        .child(
+                            div()
+                                .id(("friend-artist", ix))
+                                .truncate()
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .on_click(go(open_artist))
+                                .child(friend.artist.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("friend-context", ix))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme::text_subtle())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .on_click(go(open_context))
+                        .child(
+                            svg()
+                                .path(icons::MUSIC)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(theme::text_subtle()),
+                        )
+                        .child(div().truncate().child(friend.context.clone())),
+                ),
+        )
+}
+
 /// A small non-interactive track summary.
 fn compact_row(id: &'static str, track: &Track, window: &Window, cx: &mut App) -> Stateful<Div> {
     div()
@@ -466,6 +651,7 @@ impl Render for RightPanelView {
             RightPanel::NowPlaying => self.now_playing(window, cx),
             RightPanel::Queue => self.queue(window, cx),
             RightPanel::Devices => self.devices(window, cx),
+            RightPanel::Friends => self.friends(window, cx),
         }
     }
 }

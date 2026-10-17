@@ -13,6 +13,7 @@ pub enum RightPanel {
     NowPlaying,
     Queue,
     Devices,
+    Friends,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
