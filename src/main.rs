@@ -8,6 +8,8 @@ mod keys;
 mod library;
 mod menus;
 mod model;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod nav;
 mod pages;
 mod panels;
@@ -34,6 +36,8 @@ fn main() {
             images::ImageCache::init(cx);
             app::AppState::init(cx);
             keys::init(cx);
+            #[cfg(target_os = "linux")]
+            mpris::init(cx);
 
             let bounds = Bounds::centered(None, size(px(1320.0), px(840.0)), cx);
             let options = WindowOptions {

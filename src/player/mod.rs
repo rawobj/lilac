@@ -26,6 +26,8 @@ pub enum PlayerEvent {
     TrackChanged,
     /// Playback started or paused.
     StateChanged,
+    /// The position jumped.
+    Seeked,
 }
 
 pub struct Player {
@@ -255,6 +257,7 @@ impl Player {
         self.anchor_ms = position_ms;
         self.anchor_at = Instant::now();
         self.backend_seek(position_ms, cx);
+        cx.emit(PlayerEvent::Seeked);
         cx.notify();
     }
 
