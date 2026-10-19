@@ -6,7 +6,7 @@ description = "A fast, native Spotify client written in Rust with GPUI"
 license = "MIT"
 
 [dependencies]
-gpui-kit = "=0.7.1"
+gpui-kit = "=0.8.0"
 anyhow = "1.0.104"
 tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "gzip", "stream"] }
