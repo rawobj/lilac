@@ -171,7 +171,7 @@ impl Api {
                 self.auth.invalidate().await;
                 continue;
             }
-            if status == StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+            if status == StatusCode::TOO_MANY_REQUESTS {
                 let wait = response
                     .headers()
                     .get("retry-after")
@@ -179,10 +179,15 @@ impl Api {
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(1);
                 // A long penalty means the quota is spent; waiting would only freeze the UI.
-                if wait <= 5 {
+                if wait <= 5 && attempt < MAX_RETRIES {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     continue;
                 }
+                return Err(ApiError {
+                    status: 429,
+                    message: format!("Spotify is limiting requests right now; try again in {wait} s."),
+                }
+                .into());
             }
             if status.is_server_error() && attempt < MAX_RETRIES {
                 tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
