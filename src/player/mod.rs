@@ -169,6 +169,24 @@ impl Player {
         self.play_context(context, name, tracks, start, cx);
     }
 
+    /// More tracks of `context` arrived, e.g. the next page of a long playlist.
+    /// `start` is how many tracks of the context came before them; batches
+    /// that do not continue the queue exactly are ignored, so two loaders
+    /// feeding the same context cannot duplicate tracks.
+    pub fn extend_context(
+        &mut self,
+        context: &ContextUri,
+        start: usize,
+        tracks: Vec<Track>,
+        cx: &mut Context<Self>,
+    ) {
+        if tracks.is_empty() || !self.is_context(context) || self.queue.context_len() != start {
+            return;
+        }
+        self.queue.extend_context(tracks);
+        self.queue_changed(cx);
+    }
+
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         if self.current.is_none() {
             if let Some(track) = self.queue.current().cloned() {

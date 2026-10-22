@@ -189,6 +189,12 @@ impl CollectionPage {
                                             this.set_tracks(tracks);
                                             this.list.scroll_to(scroll);
                                         } else {
+                                            // Keep a queue started from this playlist going past what had loaded.
+                                            let context = ContextUri::Playlist(id.clone());
+                                            let (start, more) = (this.tracks.len(), tracks.clone());
+                                            app::player(cx).update(cx, |player, cx| {
+                                                player.extend_context(&context, start, more, cx)
+                                            });
                                             this.append_tracks(tracks);
                                         }
                                         more
