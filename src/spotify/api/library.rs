@@ -148,31 +148,6 @@ impl Api {
         Ok(())
     }
 
-    /// Whether each of `uris` is in the user's library.
-    pub async fn contains(&self, uris: &[String]) -> Result<Vec<bool>> {
-        let mut out = Vec::with_capacity(uris.len());
-        for chunk in uris.chunks(40) {
-            let path = format!(
-                "/me/library/contains?uris={}",
-                super::super::enc(&chunk.join(","))
-            );
-            match self.get::<Vec<bool>>(&path).await {
-                Ok(flags) => out.extend(flags),
-                Err(err) if is_unsupported(&err) => {
-                    let ids: Vec<&str> =
-                        chunk.iter().filter_map(|u| u.rsplit(':').next()).collect();
-                    let flags: Vec<bool> = self
-                        .get(&format!("/me/tracks/contains?ids={}", ids.join(",")))
-                        .await?;
-                    out.extend(flags);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        out.resize(uris.len(), false);
-        Ok(out)
-    }
-
     pub async fn create_playlist(
         &self,
         user_id: &str,

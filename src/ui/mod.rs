@@ -11,14 +11,6 @@ use gpui_kit::*;
 use crate::images::ImageCache;
 use crate::theme;
 
-pub fn icon(path: &'static str) -> Svg {
-    svg()
-        .path(path)
-        .flex_none()
-        .size(px(18.0))
-        .text_color(theme::text_muted())
-}
-
 /// Attach a plain text tooltip.
 pub trait WithTooltip: Sized {
     fn tip(self, text: &'static str) -> Self;

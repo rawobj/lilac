@@ -213,10 +213,6 @@ impl Queue {
             .filter_map(|ix| self.tracks.get(*ix as usize))
     }
 
-    pub fn upcoming_len(&self) -> usize {
-        self.order.len().saturating_sub(self.cursor + 1)
-    }
-
     /// Jump to the `n`-th upcoming context track.
     pub fn skip_to_upcoming(&mut self, n: usize) -> Option<Track> {
         let target = self.cursor + 1 + n;
@@ -316,10 +312,10 @@ mod tests {
     fn skipping_into_upcoming() {
         let mut q = Queue::default();
         q.set_context(None, "x".into(), tracks(5), 0, false);
-        assert_eq!(q.upcoming_len(), 4);
+        assert_eq!(q.upcoming().count(), 4);
         assert_eq!(id(q.skip_to_upcoming(2)), "3");
         assert_eq!(q.upcoming().count(), 1);
         q.extend_context(tracks(2));
-        assert_eq!(q.upcoming_len(), 3);
+        assert_eq!(q.upcoming().count(), 3);
     }
 }

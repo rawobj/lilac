@@ -26,21 +26,6 @@ pub fn config_dir() -> PathBuf {
     base.join(APP_DIR)
 }
 
-pub fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                home().join("Library/Caches")
-            } else {
-                home().join(".cache")
-            }
-        });
-    base.join(APP_DIR)
-}
-
 pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.json")
 }

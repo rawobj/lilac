@@ -107,7 +107,7 @@ pub async fn fetch(api: &Api) -> Result<Vec<Friend>> {
     if !response.status().is_success() {
         bail!("friend activity request failed with {status}");
     }
-    Ok(parse(&response.bytes().await?)?)
+    parse(&response.bytes().await?)
 }
 
 fn parse(body: &[u8]) -> Result<Vec<Friend>> {
@@ -137,7 +137,7 @@ fn parse(body: &[u8]) -> Result<Vec<Friend>> {
             }
         })
         .collect();
-    friends.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    friends.sort_by_key(|f| std::cmp::Reverse(f.timestamp_ms));
     Ok(friends)
 }
 

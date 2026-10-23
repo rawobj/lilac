@@ -75,6 +75,17 @@ pub struct SearchPage {
     scroll: ScrollHandle,
 }
 
+/// Title, kind label, image, round artwork, placeholder, where it opens, how it plays.
+type TopResult = (
+    SharedString,
+    &'static str,
+    Option<SharedString>,
+    bool,
+    Placeholder,
+    Route,
+    Box<dyn Fn(&mut App)>,
+);
+
 impl SearchPage {
     pub fn new(genre: Option<SharedString>, cx: &mut Context<Self>) -> Self {
         cx.observe(&app::search(cx), |_, _, cx| cx.notify())
@@ -182,39 +193,31 @@ impl SearchPage {
         window: &Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let (title, kind, image, round, placeholder, route, play): (
-            SharedString,
-            &str,
-            Option<SharedString>,
-            bool,
-            Placeholder,
-            Route,
-            Box<dyn Fn(&mut App)>,
-        ) = if let Some(artist) = results.artists.items.first() {
-            let (id, name) = (artist.id.clone(), artist.name.clone());
-            (
-                artist.name.clone(),
-                "Artist",
-                artist.images.for_size(112),
-                true,
-                Placeholder::Artist,
-                Route::Artist(artist.id.clone()),
-                Box::new(move |cx| actions::play_artist(id.clone(), name.clone(), cx)),
-            )
-        } else if let Some(album) = results.albums.items.first() {
-            let id = album.id.clone();
-            (
-                album.name.clone(),
-                "Album",
-                album.images.for_size(112),
-                false,
-                Placeholder::Music,
-                Route::Album(album.id.clone()),
-                Box::new(move |cx| actions::play_album(id.clone(), cx)),
-            )
-        } else {
-            return None;
-        };
+        let (title, kind, image, round, placeholder, route, play): TopResult =
+            if let Some(artist) = results.artists.items.first() {
+                let (id, name) = (artist.id.clone(), artist.name.clone());
+                (
+                    artist.name.clone(),
+                    "Artist",
+                    artist.images.for_size(112),
+                    true,
+                    Placeholder::Artist,
+                    Route::Artist(artist.id.clone()),
+                    Box::new(move |cx| actions::play_artist(id.clone(), name.clone(), cx)),
+                )
+            } else {
+                let album = results.albums.items.first()?;
+                let id = album.id.clone();
+                (
+                    album.name.clone(),
+                    "Album",
+                    album.images.for_size(112),
+                    false,
+                    Placeholder::Music,
+                    Route::Album(album.id.clone()),
+                    Box::new(move |cx| actions::play_album(id.clone(), cx)),
+                )
+            };
 
         Some(
             div()

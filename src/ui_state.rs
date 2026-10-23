@@ -37,7 +37,6 @@ pub struct MenuItem {
     pub action: MenuAction,
     pub danger: bool,
     pub separator: bool,
-    pub checked: bool,
 }
 
 impl MenuItem {
@@ -52,7 +51,6 @@ impl MenuItem {
             action: Rc::new(action),
             danger: false,
             separator: false,
-            checked: false,
         }
     }
 
@@ -64,11 +62,6 @@ impl MenuItem {
     /// Draw a divider above this item.
     pub fn separated(mut self) -> Self {
         self.separator = true;
-        self
-    }
-
-    pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
         self
     }
 }
@@ -83,7 +76,7 @@ pub struct Menu {
 #[derive(Clone, PartialEq)]
 pub enum Dialog {
     CreatePlaylist {
-        seed: Option<Track>,
+        seed: Option<Box<Track>>,
     },
     EditPlaylist {
         id: SharedString,

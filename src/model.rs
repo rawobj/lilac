@@ -33,15 +33,6 @@ impl Images {
     pub fn is_empty(&self) -> bool {
         self.small.is_none() && self.medium.is_none() && self.large.is_none()
     }
-
-    pub fn single(url: impl Into<SharedString>) -> Self {
-        let url = url.into();
-        Self {
-            small: Some(url.clone()),
-            medium: Some(url.clone()),
-            large: Some(url),
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -428,8 +419,6 @@ where
 /// Entry of a playlist or of the saved tracks list.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SavedItem {
-    #[serde(default)]
-    pub added_at: Option<SharedString>,
     /// `item` since 2026, `track` before. Episodes saved to a playlist show up here too.
     #[serde(default, alias = "track", alias = "episode")]
     pub item: Option<Track>,
@@ -523,16 +512,8 @@ pub struct RemoteQueue {
     pub queue: Vec<Track>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct Category {
-    #[serde(default)]
-    pub id: SharedString,
-    #[serde(default)]
-    pub name: SharedString,
-}
-
 /// A line of time-synced lyrics.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct LyricLine {
     pub start_ms: u32,
     pub text: SharedString,
@@ -545,15 +526,6 @@ pub struct Lyrics {
     pub provider: SharedString,
 }
 
-impl Default for LyricLine {
-    fn default() -> Self {
-        Self {
-            start_ms: 0,
-            text: SharedString::default(),
-        }
-    }
-}
-
 /// Anything that can be played as a context or opened as a page.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ContextUri {
@@ -564,18 +536,6 @@ pub enum ContextUri {
     Liked,
     /// Ad-hoc list (search results, top tracks) with no server-side identity.
     Tracks(SharedString),
-}
-
-impl ContextUri {
-    pub fn uri(&self) -> Option<String> {
-        match self {
-            ContextUri::Playlist(id) => Some(format!("spotify:playlist:{id}")),
-            ContextUri::Album(id) => Some(format!("spotify:album:{id}")),
-            ContextUri::Artist(id) => Some(format!("spotify:artist:{id}")),
-            ContextUri::Show(id) => Some(format!("spotify:show:{id}")),
-            ContextUri::Liked | ContextUri::Tracks(_) => None,
-        }
-    }
 }
 
 pub fn format_duration(ms: u32) -> String {
@@ -603,7 +563,7 @@ pub fn format_count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (ix, ch) in s.chars().enumerate() {
-        if ix > 0 && (s.len() - ix) % 3 == 0 {
+        if ix > 0 && (s.len() - ix).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

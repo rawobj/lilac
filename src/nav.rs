@@ -111,12 +111,6 @@ impl Nav {
         }
     }
 
-    pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.stack = vec![Route::Home];
-        self.index = 0;
-        cx.notify();
-    }
-
     fn push(&mut self, route: Route) -> bool {
         if *self.current() == route {
             return false;

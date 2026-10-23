@@ -176,7 +176,7 @@ fn decode(bytes: &[u8], edge: u32) -> anyhow::Result<(Arc<RenderImage>, usize)> 
         decoded
     };
     let mut rgba: RgbaImage = decoded.into_rgba8();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let bytes = rgba.as_raw().len();

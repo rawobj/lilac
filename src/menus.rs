@@ -168,7 +168,7 @@ fn add_to_playlist_menu(track: Track, position: Point<Pixels>, cx: &mut App) {
     let seed = track.clone();
     let mut items = vec![MenuItem::new(icons::PLUS, "New playlist", move |_, cx| {
         let dialog = Dialog::CreatePlaylist {
-            seed: Some(seed.clone()),
+            seed: Some(Box::new(seed.clone())),
         };
         app::ui(cx).update(cx, |ui, cx| ui.open_dialog(dialog, cx));
     })];

@@ -17,12 +17,15 @@ pub struct Card {
     pub round: bool,
 }
 
+/// Handler for a card's hover play button.
+pub type PlayHandler = Box<dyn Fn(&mut Window, &mut App)>;
+
 /// A clickable card. `on_play` adds the hover play button.
 pub fn card(
     id: impl Into<ElementId>,
     card: Card,
     on_open: impl Fn(&mut Window, &mut App) + 'static,
-    on_play: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    on_play: Option<PlayHandler>,
     window: &Window,
     cx: &mut App,
 ) -> Stateful<Div> {

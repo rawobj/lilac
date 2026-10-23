@@ -1,7 +1,6 @@
 //! Layers drawn above the panels: context menu, dialogs and toasts.
 
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app;
@@ -62,14 +61,6 @@ pub fn menu(cx: &mut App) -> Option<impl IntoElement + use<>> {
                         }),
                 )
                 .child(div().flex_1().truncate().child(item.label.clone()))
-                .when(item.checked, |d| {
-                    d.child(
-                        svg()
-                            .path(icons::CHECK)
-                            .size(px(14.0))
-                            .text_color(theme::accent()),
-                    )
-                })
                 .on_click(move |_, window, cx| {
                     // Close first: the action may open a follow-up menu.
                     app::ui(cx).update(cx, |ui, cx| ui.close_menu(cx));
@@ -188,7 +179,7 @@ pub fn dialog(
                                 return;
                             }
                             let description = description_state.read(cx).value().trim().to_string();
-                            let seed = seed.clone();
+                            let seed = seed.clone().map(|seed| *seed);
                             app::library(cx).update(cx, |library, cx| {
                                 library.create_playlist(name, description, seed, cx)
                             });

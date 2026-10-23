@@ -153,22 +153,6 @@ impl Player {
         }
     }
 
-    /// Play a context from a random position with shuffle switched on.
-    pub fn shuffle_context(
-        &mut self,
-        context: Option<ContextUri>,
-        name: impl Into<SharedString>,
-        tracks: Vec<Track>,
-        cx: &mut Context<Self>,
-    ) {
-        if tracks.is_empty() {
-            return;
-        }
-        self.queue.set_shuffle(true);
-        let start = (self.anchor_at.elapsed().subsec_nanos() as usize) % tracks.len();
-        self.play_context(context, name, tracks, start, cx);
-    }
-
     /// More tracks of `context` arrived, e.g. the next page of a long playlist.
     /// `start` is how many tracks of the context came before them; batches
     /// that do not continue the queue exactly are ignored, so two loaders
@@ -397,11 +381,11 @@ impl Player {
 
     /// The current track played to its end.
     fn track_ended(&mut self, cx: &mut Context<Self>) {
-        if self.repeat == Repeat::Track {
-            if let Some(track) = self.current.clone() {
-                self.start(track, 0, cx);
-                return;
-            }
+        if self.repeat == Repeat::Track
+            && let Some(track) = self.current.clone()
+        {
+            self.start(track, 0, cx);
+            return;
         }
         match self.advance_to_playable(self.repeat) {
             Some(track) => self.start(track, 0, cx),
@@ -502,10 +486,10 @@ impl Player {
                                 }
                             }
                         }));
-                        if let Some((uri, position, play)) = this.pending.take() {
-                            if let Err(err) = backend.load(&uri, play, position) {
-                                app::toast_error(format!("{err:#}"), cx);
-                            }
+                        if let Some((uri, position, play)) = this.pending.take()
+                            && let Err(err) = backend.load(&uri, play, position)
+                        {
+                            app::toast_error(format!("{err:#}"), cx);
                         }
                         this.backend = Some(backend);
                     }

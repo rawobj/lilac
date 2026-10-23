@@ -165,7 +165,7 @@ fn track(n: usize, t: usize) -> Value {
         "artists": artists,
         "album": album_ref(n),
         "duration_ms": 152_000 + ((n * 37 + t * 53) % 140) * 1000,
-        "explicit": (n + t) % 9 == 0,
+        "explicit": (n + t).is_multiple_of(9),
         "track_number": t + 1,
         "disc_number": 1,
         "is_playable": true,
