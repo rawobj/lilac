@@ -39,6 +39,23 @@ pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }
 
+/// A random id for this installation, kept across runs so Spotify sees one
+/// device rather than a new one on every start.
+pub fn device_id() -> String {
+    let path = config_dir().join("device_id");
+    if let Ok(id) = std::fs::read_to_string(&path) {
+        let id = id.trim();
+        if id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return id.to_string();
+        }
+    }
+    let mut bytes = [0u8; 20];
+    let _ = getrandom::fill(&mut bytes);
+    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let _ = write_private(&path, id.as_bytes());
+    id
+}
+
 /// Write `contents` atomically, readable by the current user only.
 pub fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {

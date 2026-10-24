@@ -66,6 +66,19 @@ impl Queue {
         self.shuffled
     }
 
+    /// A read-only copy of what Spotify says plays next. Spotify does not say
+    /// which entries were queued by hand, so all of them count as upcoming.
+    pub fn mirror(current: Option<Track>, upcoming: Vec<Track>) -> Self {
+        let mut tracks = Vec::with_capacity(upcoming.len() + 1);
+        tracks.push(current.unwrap_or_default());
+        tracks.extend(upcoming);
+        Queue {
+            order: (0..tracks.len() as u32).collect(),
+            tracks,
+            ..Queue::default()
+        }
+    }
+
     /// Replace the context and start at `index` (an index into `tracks`).
     pub fn set_context(
         &mut self,

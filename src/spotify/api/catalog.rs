@@ -134,6 +134,18 @@ impl Api {
         }
     }
 
+    /// A track or episode by `spotify:` URI.
+    pub async fn item(&self, uri: &str) -> Result<Track> {
+        let id = uri.rsplit(':').next().unwrap_or_default();
+        if uri.starts_with("spotify:episode:") {
+            let mut episode: Track = self.get(&format!("/episodes/{id}")).await?;
+            episode.kind = ItemKind::Episode;
+            Ok(episode)
+        } else {
+            self.get(&format!("/tracks/{id}")).await
+        }
+    }
+
     pub async fn show(&self, id: &str) -> Result<Show> {
         self.get(&format!("/shows/{id}")).await
     }

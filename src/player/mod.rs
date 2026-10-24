@@ -1,4 +1,10 @@
 //! Playback state: what is playing, where in the track we are, and what comes next.
+//!
+//! With an account, playback runs through Spotify Connect: lilac is one
+//! device among the user's others, Spotify decides what plays next, and this
+//! entity mirrors that state for the UI. When another device is active, the
+//! same controls drive that device instead. In demo mode there is nothing to
+//! stream, so a local queue and a clock stand in.
 
 mod backend;
 pub mod queue;
@@ -6,20 +12,23 @@ pub mod queue;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
+use librespot_metadata::audio::{AudioItem, UniqueFields};
 
 use crate::app;
-use crate::model::{ContextUri, Track};
+use crate::model::{AlbumRef, ArtistRef, ContextUri, Images, ItemKind, ShowRef, Track};
 use crate::runtime;
 use crate::session::{Session, SessionEvent};
 use crate::settings::Settings;
 
-use backend::{Backend, EngineEvent, Options};
+use backend::{Backend, Channels, Cluster, EngineEvent, Options, Start};
+pub use backend::Device;
 pub use queue::{Queue, Repeat};
 
 /// Restart the current track instead of going to the previous one past this point.
 const RESTART_THRESHOLD_MS: u32 = 3000;
-/// Give up skipping after this many unavailable tracks in a row.
-const MAX_UNAVAILABLE_STREAK: u32 = 5;
+/// Connect the streaming session this long after login, once the first
+/// screen has what it needs from the network.
+const CONNECT_DELAY: Duration = Duration::from_secs(2);
 
 pub enum PlayerEvent {
     /// A different track became current.
@@ -30,7 +39,16 @@ pub enum PlayerEvent {
     Seeked,
 }
 
+/// A load requested before the streaming session was ready.
+struct PendingLoad {
+    context: Option<String>,
+    tracks: Vec<String>,
+    start: Start,
+}
+
 pub struct Player {
+    /// The local queue in demo mode; with Connect, a mirror of what Spotify
+    /// says comes next.
     pub queue: Queue,
     pub current: Option<Track>,
     pub playing: bool,
@@ -39,6 +57,9 @@ pub struct Player {
     pub repeat: Repeat,
     pub volume: f32,
     pub muted: bool,
+    /// Devices in the user's Connect list, and the one playing.
+    pub devices: Vec<Device>,
+    pub active_device: Option<String>,
     /// Position at `anchor_at`. While playing, the live position is extrapolated from it.
     anchor_ms: u32,
     anchor_at: Instant,
@@ -46,22 +67,40 @@ pub struct Player {
     backend: Option<Backend>,
     /// The streaming session is being set up.
     starting: Option<Task<()>>,
-    /// A load requested before the session was ready: (uri, position, play).
-    pending: Option<(SharedString, u32, bool)>,
-    events: Option<Task<()>>,
-    /// librespot asked for the next track; later queue edits re-preload.
-    preload_due: bool,
-    unavailable_streak: u32,
+    pending: Option<PendingLoad>,
+    listeners: Vec<Task<()>>,
+    /// Context of Connect playback; `queue.context` in demo mode.
+    connect_context: Option<String>,
+    connect_shuffle: bool,
+    /// The user's Liked Songs as a Connect context.
+    liked_uri: Option<String>,
+    /// Upcoming URIs the mirrored queue was built from.
+    mirrored_next: Vec<String>,
+    lookup: Option<Task<()>>,
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
 
 impl Player {
     pub fn new(session: &Entity<Session>, settings: &Settings, cx: &mut Context<Self>) -> Self {
-        cx.subscribe(session, |this, _, event, cx| {
-            if let SessionEvent::LoggedOut = event {
+        cx.subscribe(session, |this, session, event, cx| match event {
+            SessionEvent::Ready if !session.read(cx).is_demo() => {
+                // Join the user's Connect devices without waiting for a first play.
+                this.starting = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(CONNECT_DELAY).await;
+                    this.update(cx, |this, cx| {
+                        this.starting = None;
+                        this.ensure_backend(cx);
+                    })
+                    .ok();
+                }));
+            }
+            SessionEvent::Ready => {}
+            SessionEvent::LoggedOut => {
                 this.stop(cx);
                 this.drop_backend();
+                this.devices.clear();
+                this.active_device = None;
             }
         })
         .detach();
@@ -74,15 +113,20 @@ impl Player {
             repeat: Repeat::Off,
             volume: settings.volume.clamp(0.0, 1.0),
             muted: false,
+            devices: Vec::new(),
+            active_device: None,
             anchor_ms: 0,
             anchor_at: Instant::now(),
             ticker: None,
             backend: None,
             starting: None,
             pending: None,
-            events: None,
-            preload_due: false,
-            unavailable_streak: 0,
+            listeners: Vec::new(),
+            connect_context: None,
+            connect_shuffle: false,
+            liked_uri: None,
+            mirrored_next: Vec::new(),
+            lookup: None,
         }
     }
 
@@ -115,17 +159,45 @@ impl Player {
             .is_some_and(|t| t.id.as_ref() == track_id)
     }
 
-    /// True when `context` is what the queue is playing from.
+    /// True when `context` is what is playing.
     pub fn is_context(&self, context: &ContextUri) -> bool {
+        if self.connected() {
+            return self.connect_context.is_some()
+                && self.connect_context.as_deref() == self.context_uri(context).as_deref();
+        }
         self.queue.context.as_ref() == Some(context)
     }
 
     pub fn shuffle(&self) -> bool {
-        self.queue.shuffled()
+        if self.connected() {
+            self.connect_shuffle
+        } else {
+            self.queue.shuffled()
+        }
     }
 
     pub fn effective_volume(&self) -> f32 {
         if self.muted { 0.0 } else { self.volume }
+    }
+
+    /// The device playing, when it is not this one.
+    pub fn remote_device(&self) -> Option<&Device> {
+        let ours = self.backend.as_ref().map(|b| b.device_id.as_str());
+        let active = self.active_device.as_deref()?;
+        if Some(active) == ours {
+            return None;
+        }
+        self.devices.iter().find(|d| d.id == active)
+    }
+
+    /// Queued tracks can be removed or reordered. Spotify Connect offers no
+    /// way to do that, so only the local queue can.
+    pub fn queue_editable(&self) -> bool {
+        !self.connected()
+    }
+
+    fn connected(&self) -> bool {
+        self.backend.is_some() || self.starting.is_some()
     }
 
     // ----------------------------------------------------------------- commands
@@ -143,20 +215,81 @@ impl Player {
         let index = (index..tracks.len())
             .find(|ix| tracks[*ix].playable())
             .unwrap_or(index);
-        let shuffle = self.queue.shuffled();
-        match self
-            .queue
-            .set_context(context, name.into(), tracks, index, shuffle)
-        {
-            Some(track) => self.start(track, 0, cx),
-            None => app::toast("Nothing to play here", cx),
+        if self.simulated(cx) {
+            let shuffle = self.queue.shuffled();
+            match self
+                .queue
+                .set_context(context, name.into(), tracks, index, shuffle)
+            {
+                Some(track) => self.start_simulated(track, cx),
+                None => app::toast("Nothing to play here", cx),
+            }
+            return;
         }
+
+        let Some(first) = tracks.get(index).cloned() else {
+            app::toast("Nothing to play here", cx);
+            return;
+        };
+        let context_uri = context.as_ref().and_then(|c| self.context_uri(c));
+        let uris: Vec<String> = tracks
+            .iter()
+            .filter(|t| t.playable())
+            .map(|t| t.uri.to_string())
+            .collect();
+        let start = match &context_uri {
+            Some(_) => Start::Uri(first.uri.to_string()),
+            None => Start::Index(
+                uris.iter()
+                    .position(|u| *u == first.uri.as_ref())
+                    .unwrap_or(0) as u32,
+            ),
+        };
+
+        // Show the choice at once; Spotify confirms it a moment later.
+        self.current = Some(first);
+        self.connect_context = context_uri.clone();
+        self.anchor_ms = 0;
+        self.anchor_at = Instant::now();
+        self.playing = true;
+        self.loading = true;
+        cx.emit(PlayerEvent::TrackChanged);
+        cx.notify();
+
+        if self.remote_device().is_some() {
+            let api = app::api(cx);
+            let offset = match &start {
+                Start::Uri(uri) => Some(uri.clone()),
+                Start::Index(ix) => uris.get(*ix as usize).cloned(),
+            };
+            let tracks = context_uri.is_none().then_some(uris);
+            remote(cx, async move {
+                api.remote_play(
+                    None,
+                    context_uri.as_deref(),
+                    tracks.as_deref(),
+                    offset.as_deref(),
+                    0,
+                )
+                .await
+            });
+            return;
+        }
+        self.load(
+            PendingLoad {
+                context: context_uri,
+                tracks: uris,
+                start,
+            },
+            cx,
+        );
     }
 
     /// More tracks of `context` arrived, e.g. the next page of a long playlist.
     /// `start` is how many tracks of the context came before them; batches
     /// that do not continue the queue exactly are ignored, so two loaders
-    /// feeding the same context cannot duplicate tracks.
+    /// feeding the same context cannot duplicate tracks. Connect resolves
+    /// whole contexts itself, so this only matters for the local queue.
     pub fn extend_context(
         &mut self,
         context: &ContextUri,
@@ -164,17 +297,23 @@ impl Player {
         tracks: Vec<Track>,
         cx: &mut Context<Self>,
     ) {
-        if tracks.is_empty() || !self.is_context(context) || self.queue.context_len() != start {
+        if self.connected()
+            || tracks.is_empty()
+            || !self.is_context(context)
+            || self.queue.context_len() != start
+        {
             return;
         }
         self.queue.extend_context(tracks);
-        self.queue_changed(cx);
+        cx.notify();
     }
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         if self.current.is_none() {
-            if let Some(track) = self.queue.current().cloned() {
-                self.start(track, 0, cx);
+            if let Some(track) = self.queue.current().cloned()
+                && self.simulated(cx)
+            {
+                self.start_simulated(track, cx);
             }
             return;
         }
@@ -193,7 +332,15 @@ impl Player {
         self.anchor_at = Instant::now();
         self.playing = false;
         self.ticker = None;
-        self.backend_pause(cx);
+        if self.remote_device().is_some() {
+            let api = app::api(cx);
+            remote(cx, async move { api.remote_pause().await });
+        } else if let Some(backend) = self.backend() {
+            backend.pause();
+        } else if let Some(pending) = self.pending.take() {
+            // Paused before the session was up: drop the load, keep the selection.
+            drop(pending);
+        }
         cx.emit(PlayerEvent::StateChanged);
         cx.notify();
     }
@@ -204,38 +351,80 @@ impl Player {
         }
         self.anchor_at = Instant::now();
         self.playing = true;
-        self.backend_resume(cx);
-        self.start_ticker(cx);
+        if self.simulated(cx) {
+            self.start_ticker(cx);
+        } else if self.remote_device().is_some() {
+            let api = app::api(cx);
+            remote(cx, async move {
+                api.remote_play(None, None, None, None, 0).await
+            });
+        } else if let Some(backend) = self.backend() {
+            backend.play();
+        } else if let Some(track) = self.current.clone() {
+            // The session dropped while paused: pick up where we were.
+            let position = self.anchor_ms;
+            self.load(
+                PendingLoad {
+                    context: None,
+                    tracks: vec![track.uri.to_string()],
+                    start: Start::Index(0),
+                },
+                cx,
+            );
+            self.seek(position, cx);
+        }
         cx.emit(PlayerEvent::StateChanged);
         cx.notify();
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
-        self.backend_stop(cx);
+        if let Some(backend) = self.backend() {
+            backend.pause();
+        }
+        self.pending = None;
         self.queue = Queue::default();
         self.current = None;
         self.playing = false;
         self.loading = false;
         self.anchor_ms = 0;
         self.ticker = None;
+        self.connect_context = None;
+        self.mirrored_next.clear();
         cx.emit(PlayerEvent::TrackChanged);
         cx.notify();
     }
 
     pub fn next(&mut self, cx: &mut Context<Self>) {
-        // An explicit skip leaves "repeat one" for the next track, like the official clients.
-        let repeat = if self.repeat == Repeat::Track {
-            Repeat::Context
-        } else {
-            self.repeat
-        };
-        match self.advance_to_playable(repeat) {
-            Some(track) => self.start(track, 0, cx),
-            None => self.finish(cx),
+        if self.simulated(cx) {
+            // An explicit skip leaves "repeat one" for the next track, like the official clients.
+            let repeat = if self.repeat == Repeat::Track {
+                Repeat::Context
+            } else {
+                self.repeat
+            };
+            match self.advance_to_playable(repeat) {
+                Some(track) => self.start_simulated(track, cx),
+                None => self.finish(cx),
+            }
+        } else if self.remote_device().is_some() {
+            let api = app::api(cx);
+            remote(cx, async move { api.remote_next().await });
+        } else if let Some(backend) = self.backend() {
+            backend.next();
         }
     }
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
+        if !self.simulated(cx) {
+            // Spotify restarts the track or goes back itself, by the same rule.
+            if self.remote_device().is_some() {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_previous().await });
+            } else if let Some(backend) = self.backend() {
+                backend.previous();
+            }
+            return;
+        }
         if self.position_ms() > RESTART_THRESHOLD_MS {
             self.seek(0, cx);
             return;
@@ -246,7 +435,7 @@ impl Player {
             self.repeat
         };
         match self.queue.retreat(repeat) {
-            Some(track) => self.start(track, 0, cx),
+            Some(track) => self.start_simulated(track, cx),
             None => self.seek(0, cx),
         }
     }
@@ -258,7 +447,12 @@ impl Player {
         let position_ms = position_ms.min(self.duration_ms());
         self.anchor_ms = position_ms;
         self.anchor_at = Instant::now();
-        self.backend_seek(position_ms, cx);
+        if self.remote_device().is_some() {
+            let api = app::api(cx);
+            remote(cx, async move { api.remote_seek(position_ms).await });
+        } else if let Some(backend) = self.backend() {
+            backend.seek(position_ms);
+        }
         cx.emit(PlayerEvent::Seeked);
         cx.notify();
     }
@@ -272,7 +466,7 @@ impl Player {
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume.clamp(0.0, 1.0);
         self.muted = false;
-        self.backend_volume(cx);
+        self.apply_volume(cx);
         cx.notify();
     }
 
@@ -280,81 +474,139 @@ impl Player {
     pub fn persist_volume(&self, cx: &mut Context<Self>) {
         let volume = self.volume;
         app::update_settings(cx, |settings| settings.volume = volume);
+        if self.remote_device().is_some() {
+            // One request per gesture, not per drag step.
+            let api = app::api(cx);
+            let percent = (self.effective_volume() * 100.0).round() as u32;
+            remote(cx, async move { api.remote_volume(percent).await });
+        }
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         self.muted = !self.muted;
-        self.backend_volume(cx);
+        self.apply_volume(cx);
         cx.notify();
     }
 
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
-        let on = !self.queue.shuffled();
-        self.queue.set_shuffle(on);
-        self.backend_modes(cx);
-        self.queue_changed(cx);
+        let on = !self.shuffle();
+        if self.simulated(cx) {
+            self.queue.set_shuffle(on);
+        } else {
+            self.connect_shuffle = on;
+            if self.remote_device().is_some() {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_shuffle(on).await });
+            } else if let Some(backend) = self.backend() {
+                backend.set_shuffle(on);
+            }
+        }
+        cx.notify();
     }
 
     pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
         self.repeat = self.repeat.next();
-        self.backend_modes(cx);
-        self.queue_changed(cx);
+        let repeat = self.repeat;
+        if self.remote_device().is_some() {
+            let api = app::api(cx);
+            let state = match repeat {
+                Repeat::Off => "off",
+                Repeat::Context => "context",
+                Repeat::Track => "track",
+            };
+            remote(cx, async move { api.remote_repeat(state).await });
+        } else if let Some(backend) = self.backend() {
+            backend.set_repeat(repeat != Repeat::Off, repeat == Repeat::Track);
+        }
+        cx.notify();
     }
 
     pub fn enqueue(&mut self, track: Track, cx: &mut Context<Self>) {
-        if !track.playable() {
-            app::toast("This item can't be played", cx);
-            return;
-        }
-        if self.current.is_none() && self.queue.is_empty() {
-            self.play_context(None, track.name.clone(), vec![track], 0, cx);
-            return;
-        }
-        self.backend_enqueue(&track, cx);
-        self.queue.push_user(track);
-        app::toast("Added to queue", cx);
-        self.queue_changed(cx);
+        self.add_to_queue(track, false, cx);
     }
 
     pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.add_to_queue(track, true, cx);
+    }
+
+    fn add_to_queue(&mut self, track: Track, front: bool, cx: &mut Context<Self>) {
         if !track.playable() {
             app::toast("This item can't be played", cx);
             return;
         }
-        if self.current.is_none() && self.queue.is_empty() {
+        if self.current.is_none() && (self.queue.is_empty() || !self.simulated(cx)) {
             self.play_context(None, track.name.clone(), vec![track], 0, cx);
             return;
         }
-        self.queue.push_user_front(track);
-        app::toast("Playing next", cx);
-        self.queue_changed(cx);
+        if !self.simulated(cx) {
+            // Spotify plays queued tracks before the rest of the context, in
+            // the order they were added; there is no separate "play next".
+            let api = app::api(cx);
+            let uri = track.uri.to_string();
+            cx.spawn(async move |_, cx| {
+                let result = runtime::run(async move { api.remote_enqueue(&uri).await }).await;
+                cx.update(|cx| match result {
+                    Ok(()) => app::toast("Added to queue", cx),
+                    Err(err) => app::toast_error(format!("{err:#}"), cx),
+                });
+            })
+            .detach();
+            return;
+        }
+        if front {
+            self.queue.push_user_front(track);
+            app::toast("Playing next", cx);
+        } else {
+            self.queue.push_user(track);
+            app::toast("Added to queue", cx);
+        }
+        cx.notify();
     }
 
     pub fn remove_queued(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.queue.remove_user(index);
-        self.queue_changed(cx);
+        if self.queue_editable() {
+            self.queue.remove_user(index);
+            cx.notify();
+        }
     }
 
     pub fn clear_queue(&mut self, cx: &mut Context<Self>) {
-        self.queue.clear_user();
-        self.queue_changed(cx);
+        if self.queue_editable() {
+            self.queue.clear_user();
+            cx.notify();
+        }
     }
 
     /// Jump to the `n`-th track of the manual queue.
     pub fn skip_to_queued(&mut self, n: usize, cx: &mut Context<Self>) {
-        if let Some(track) = self.queue.skip_to_user(n) {
-            self.start(track, 0, cx);
+        if !self.simulated(cx) {
+            self.skip_ahead(n + 1, cx);
+        } else if let Some(track) = self.queue.skip_to_user(n) {
+            self.start_simulated(track, cx);
         }
     }
 
     /// Jump to the `n`-th upcoming track of the context.
     pub fn skip_to_upcoming(&mut self, n: usize, cx: &mut Context<Self>) {
-        if let Some(track) = self.queue.skip_to_upcoming(n) {
-            self.start(track, 0, cx);
+        if !self.simulated(cx) {
+            self.skip_ahead(n + 1, cx);
+        } else if let Some(track) = self.queue.skip_to_upcoming(n) {
+            self.start_simulated(track, cx);
         }
     }
 
-    // ---------------------------------------------------------------- internals
+    /// Connect has no "jump to"; skipping in order lands on the same track.
+    fn skip_ahead(&mut self, steps: usize, cx: &mut Context<Self>) {
+        for _ in 0..steps.min(50) {
+            self.next(cx);
+        }
+    }
+
+    // ------------------------------------------------------------ demo playback
+
+    fn simulated(&self, cx: &App) -> bool {
+        app::session(cx).read(cx).is_demo()
+    }
 
     fn advance_to_playable(&mut self, repeat: Repeat) -> Option<Track> {
         // Bounded so a context made only of unplayable tracks cannot spin forever.
@@ -367,14 +619,12 @@ impl Player {
         None
     }
 
-    fn start(&mut self, track: Track, position_ms: u32, cx: &mut Context<Self>) {
-        self.current = Some(track.clone());
-        self.anchor_ms = position_ms;
+    fn start_simulated(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.current = Some(track);
+        self.anchor_ms = 0;
         self.anchor_at = Instant::now();
         self.playing = true;
-        self.backend_start(&track, position_ms, cx);
         self.start_ticker(cx);
-        self.queue_changed(cx);
         cx.emit(PlayerEvent::TrackChanged);
         cx.notify();
     }
@@ -384,11 +634,11 @@ impl Player {
         if self.repeat == Repeat::Track
             && let Some(track) = self.current.clone()
         {
-            self.start(track, 0, cx);
+            self.start_simulated(track, cx);
             return;
         }
         match self.advance_to_playable(self.repeat) {
-            Some(track) => self.start(track, 0, cx),
+            Some(track) => self.start_simulated(track, cx),
             None => self.finish(cx),
         }
     }
@@ -399,24 +649,12 @@ impl Player {
         self.loading = false;
         self.anchor_ms = 0;
         self.ticker = None;
-        self.backend_pause(cx);
-        self.backend_seek(0, cx);
         cx.emit(PlayerEvent::StateChanged);
         cx.notify();
     }
 
-    /// Something about the upcoming tracks changed.
-    fn queue_changed(&mut self, cx: &mut Context<Self>) {
-        self.backend_preload(cx);
-        cx.notify();
-    }
-
-    /// Without an audio backend the clock alone decides when a track is over.
+    /// The clock alone decides when a demo track is over.
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
-        if !self.simulated(cx) {
-            self.ticker = None;
-            return;
-        }
         self.ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -440,14 +678,7 @@ impl Player {
         }));
     }
 
-    // ------------------------------------------------------------------ backend
-    //
-    // librespot does the audio. In demo mode there is no account to stream
-    // with, so playback is simulated by the clock above.
-
-    fn simulated(&self, cx: &App) -> bool {
-        app::session(cx).read(cx).is_demo()
-    }
+    // --------------------------------------------------------- Connect playback
 
     fn backend(&self) -> Option<&Backend> {
         self.backend.as_ref().filter(|b| b.is_usable())
@@ -457,131 +688,24 @@ impl Player {
         if let Some(backend) = self.backend.take() {
             backend.shutdown();
         }
-        self.events = None;
+        self.listeners.clear();
         self.starting = None;
         self.pending = None;
     }
 
-    /// Connect the streaming session in the background, then run any pending load.
-    fn ensure_backend(&mut self, cx: &mut Context<Self>) {
-        if self.starting.is_some() {
-            return;
-        }
-        let options = Options::from_settings(app::settings(cx).read(cx));
-        let auth = app::session(cx).read(cx).streaming.clone();
-        let volume = self.effective_volume();
-        self.starting = Some(cx.spawn(async move |this, cx| {
-            let result = runtime::run(Backend::start(auth, options, volume)).await;
-            this.update(cx, |this, cx| {
-                this.starting = None;
-                match result {
-                    Ok((backend, mut events)) => {
-                        this.events = Some(cx.spawn(async move |this, cx| {
-                            while let Some(event) = events.recv().await {
-                                if this
-                                    .update(cx, |this, cx| this.on_engine_event(event, cx))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        }));
-                        if let Some((uri, position, play)) = this.pending.take()
-                            && let Err(err) = backend.load(&uri, play, position)
-                        {
-                            app::toast_error(format!("{err:#}"), cx);
-                        }
-                        this.backend = Some(backend);
-                    }
-                    Err(err) => {
-                        this.pending = None;
-                        this.loading = false;
-                        this.playing = false;
-                        this.anchor_at = Instant::now();
-                        app::toast_error(format!("{err:#}"), cx);
-                        cx.emit(PlayerEvent::StateChanged);
-                        cx.notify();
-                    }
-                }
-            })
-            .ok();
-        }));
+    /// The `spotify:` URI Connect knows `context` by.
+    fn context_uri(&self, context: &ContextUri) -> Option<String> {
+        Some(match context {
+            ContextUri::Playlist(id) => format!("spotify:playlist:{id}"),
+            ContextUri::Album(id) => format!("spotify:album:{id}"),
+            ContextUri::Artist(id) => format!("spotify:artist:{id}"),
+            ContextUri::Show(id) => format!("spotify:show:{id}"),
+            ContextUri::Liked => return self.liked_uri.clone(),
+            ContextUri::Tracks(_) => return None,
+        })
     }
 
-    fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
-        let is_current = |this: &Self, uri: &librespot_core::spotify_uri::SpotifyUri| {
-            backend::event_uri(uri)
-                .is_some_and(|uri| this.current.as_ref().is_some_and(|t| t.uri.as_ref() == uri))
-        };
-        match event {
-            EngineEvent::Playing {
-                track_id,
-                position_ms,
-                ..
-            } if is_current(self, &track_id) => {
-                self.unavailable_streak = 0;
-                self.loading = false;
-                self.anchor_ms = position_ms;
-                self.anchor_at = Instant::now();
-                cx.emit(PlayerEvent::StateChanged);
-                cx.notify();
-            }
-            EngineEvent::Paused {
-                track_id,
-                position_ms,
-                ..
-            } if is_current(self, &track_id) => {
-                self.loading = false;
-                self.anchor_ms = position_ms;
-                self.anchor_at = Instant::now();
-                cx.notify();
-            }
-            EngineEvent::Seeked {
-                track_id,
-                position_ms,
-                ..
-            }
-            | EngineEvent::PositionCorrection {
-                track_id,
-                position_ms,
-                ..
-            } if is_current(self, &track_id) => {
-                self.anchor_ms = position_ms;
-                self.anchor_at = Instant::now();
-                cx.notify();
-            }
-            EngineEvent::EndOfTrack { track_id, .. } if is_current(self, &track_id) => {
-                self.track_ended(cx);
-            }
-            EngineEvent::Unavailable { track_id, .. } if is_current(self, &track_id) => {
-                let name = self
-                    .current
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default();
-                app::toast_error(format!("\u{201c}{name}\u{201d} isn't available"), cx);
-                self.unavailable_streak += 1;
-                if self.unavailable_streak < MAX_UNAVAILABLE_STREAK {
-                    self.next(cx);
-                } else {
-                    self.unavailable_streak = 0;
-                    self.finish(cx);
-                }
-            }
-            EngineEvent::TimeToPreloadNextTrack { track_id, .. } if is_current(self, &track_id) => {
-                self.preload_due = true;
-                self.backend_preload(cx);
-            }
-            _ => {}
-        }
-    }
-
-    fn backend_start(&mut self, track: &Track, position_ms: u32, cx: &mut Context<Self>) {
-        if self.simulated(cx) {
-            return;
-        }
-        self.loading = true;
-        self.preload_due = false;
+    fn load(&mut self, load: PendingLoad, cx: &mut Context<Self>) {
         // Quality, normalisation and gapless are fixed per librespot player.
         let options = Options::from_settings(app::settings(cx).read(cx));
         if self
@@ -593,87 +717,330 @@ impl Player {
         }
         match self.backend() {
             Some(backend) => {
-                if let Err(err) = backend.load(&track.uri, true, position_ms) {
+                let shuffle = self.connect_shuffle;
+                if let Err(err) =
+                    backend.load(load.context.as_deref(), &load.tracks, load.start, shuffle)
+                {
                     app::toast_error(format!("{err:#}"), cx);
                 }
             }
             None => {
-                self.pending = Some((track.uri.clone(), position_ms, true));
+                self.pending = Some(load);
                 self.ensure_backend(cx);
             }
         }
     }
 
-    fn backend_pause(&mut self, _cx: &mut Context<Self>) {
-        match self.backend() {
-            Some(backend) => backend.pause(),
-            None => {
-                if let Some(pending) = self.pending.as_mut() {
-                    pending.2 = false;
-                }
-            }
-        }
-    }
-
-    fn backend_resume(&mut self, cx: &mut Context<Self>) {
-        if self.simulated(cx) {
-            return;
-        }
-        match self.backend() {
-            Some(backend) => backend.play(),
-            None => {
-                if let Some(pending) = self.pending.as_mut() {
-                    pending.2 = true;
-                } else if let Some(track) = self.current.clone() {
-                    // The session dropped while paused: pick up where we were.
-                    let position = self.anchor_ms;
-                    self.backend_start(&track, position, cx);
-                }
-            }
-        }
-    }
-
-    fn backend_stop(&mut self, _cx: &mut Context<Self>) {
-        self.pending = None;
-        if let Some(backend) = self.backend() {
-            backend.stop();
-        }
-    }
-
-    fn backend_seek(&mut self, position_ms: u32, _cx: &mut Context<Self>) {
-        match self.backend() {
-            Some(backend) => backend.seek(position_ms),
-            None => {
-                if let Some(pending) = self.pending.as_mut() {
-                    pending.1 = position_ms;
-                }
-            }
-        }
-    }
-
-    fn backend_volume(&mut self, _cx: &mut Context<Self>) {
-        if let Some(backend) = self.backend() {
+    fn apply_volume(&mut self, _cx: &mut Context<Self>) {
+        if self.remote_device().is_none()
+            && let Some(backend) = self.backend()
+        {
             backend.set_volume(self.effective_volume());
         }
     }
 
-    fn backend_modes(&mut self, _cx: &mut Context<Self>) {}
-
-    fn backend_enqueue(&mut self, _track: &Track, _cx: &mut Context<Self>) {}
-
-    /// Hand librespot the track that will follow, once it has asked for one.
-    fn backend_preload(&mut self, _cx: &mut Context<Self>) {
-        if !self.preload_due {
+    /// Connect the streaming session in the background, then run any pending load.
+    fn ensure_backend(&mut self, cx: &mut Context<Self>) {
+        if self.backend.is_some() || self.starting.is_some() {
             return;
         }
-        let repeat = self.repeat;
-        let next = if repeat == Repeat::Track {
-            self.current.clone()
-        } else {
-            self.queue.peek(repeat).filter(|t| t.playable()).cloned()
-        };
-        if let (Some(backend), Some(next)) = (self.backend(), next) {
-            let _ = backend.preload(&next.uri);
+        let options = Options::from_settings(app::settings(cx).read(cx));
+        let auth = app::session(cx).read(cx).streaming.clone();
+        let volume = self.effective_volume();
+        self.liked_uri = app::session(cx)
+            .read(cx)
+            .user
+            .as_ref()
+            .map(|u| format!("spotify:user:{}:collection", u.id));
+        self.starting = Some(cx.spawn(async move |this, cx| {
+            let result = runtime::run(Backend::start(auth, options, volume)).await;
+            this.update(cx, |this, cx| {
+                this.starting = None;
+                match result {
+                    Ok((backend, channels)) => {
+                        this.listen(channels, cx);
+                        this.backend = Some(backend);
+                        if let Some(load) = this.pending.take() {
+                            this.load(load, cx);
+                        }
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        let had_request = this.pending.take().is_some();
+                        this.loading = false;
+                        this.playing = false;
+                        this.anchor_at = Instant::now();
+                        // Joining Connect quietly at login may fail offline; only a
+                        // failed play is worth interrupting the user for.
+                        if had_request {
+                            app::toast_error(format!("{err:#}"), cx);
+                        }
+                        cx.emit(PlayerEvent::StateChanged);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn listen(&mut self, channels: Channels, cx: &mut Context<Self>) {
+        let Channels {
+            mut engine,
+            mut cluster,
+        } = channels;
+        self.listeners = vec![
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = engine.recv().await {
+                    if this
+                        .update(cx, |this, cx| this.on_engine_event(event, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+            cx.spawn(async move |this, cx| {
+                while let Some(update) = cluster.recv().await {
+                    if this
+                        .update(cx, |this, cx| this.on_cluster(update, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+        ];
+    }
+
+    /// Events from this device's own player.
+    fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
+        if self.remote_device().is_some() {
+            return;
+        }
+        match event {
+            EngineEvent::TrackChanged { audio_item } => {
+                self.current = Some(track_from_audio_item(&audio_item));
+                self.anchor_ms = 0;
+                self.anchor_at = Instant::now();
+                cx.emit(PlayerEvent::TrackChanged);
+                cx.notify();
+            }
+            EngineEvent::Playing { position_ms, .. } => {
+                self.loading = false;
+                self.playing = true;
+                self.anchor(position_ms);
+                cx.emit(PlayerEvent::StateChanged);
+                cx.notify();
+            }
+            EngineEvent::Paused { position_ms, .. } => {
+                self.loading = false;
+                self.playing = false;
+                self.anchor(position_ms);
+                cx.emit(PlayerEvent::StateChanged);
+                cx.notify();
+            }
+            EngineEvent::Seeked { position_ms, .. }
+            | EngineEvent::PositionCorrection { position_ms, .. }
+            | EngineEvent::PositionChanged { position_ms, .. } => {
+                self.anchor(position_ms);
+                cx.notify();
+            }
+            EngineEvent::Stopped { .. } => {
+                self.playing = false;
+                self.loading = false;
+                cx.emit(PlayerEvent::StateChanged);
+                cx.notify();
+            }
+            EngineEvent::Unavailable { .. } => {
+                let name = self
+                    .current
+                    .as_ref()
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                // Spotify moves on to the next track by itself.
+                app::toast_error(format!("\u{201c}{name}\u{201d} isn't available"), cx);
+            }
+            EngineEvent::ShuffleChanged { shuffle } => {
+                self.connect_shuffle = shuffle;
+                cx.notify();
+            }
+            EngineEvent::RepeatChanged { context, track } => {
+                self.repeat = match (context, track) {
+                    (_, true) => Repeat::Track,
+                    (true, false) => Repeat::Context,
+                    (false, false) => Repeat::Off,
+                };
+                cx.notify();
+            }
+            EngineEvent::VolumeChanged { volume } => {
+                self.volume = backend::from_mixer(volume);
+                self.muted = false;
+                cx.notify();
+            }
+            _ => {}
         }
     }
+
+    /// Spotify's view of all devices, pushed on every change.
+    fn on_cluster(&mut self, update: Cluster, cx: &mut Context<Self>) {
+        self.devices = update.devices;
+        self.active_device = update.active_device;
+        let Some(playback) = update.playback else {
+            cx.notify();
+            return;
+        };
+
+        if self.remote_device().is_some() {
+            // Another device plays: mirror it.
+            self.playing = playback.playing;
+            self.loading = false;
+            self.connect_shuffle = playback.shuffle;
+            self.repeat = match (playback.repeat_context, playback.repeat_track) {
+                (_, true) => Repeat::Track,
+                (true, false) => Repeat::Context,
+                (false, false) => Repeat::Off,
+            };
+            self.anchor(playback.position_ms);
+            self.connect_context = Some(playback.context_uri.clone()).filter(|c| !c.is_empty());
+            let known = self
+                .current
+                .as_ref()
+                .is_some_and(|t| t.uri.as_ref() == playback.track_uri);
+            if !known {
+                self.look_up_current(playback.track_uri.clone(), playback.duration_ms, cx);
+            }
+            cx.emit(PlayerEvent::StateChanged);
+        }
+        if playback.next != self.mirrored_next {
+            self.mirrored_next = playback.next;
+            self.refresh_queue(cx);
+        }
+        cx.notify();
+    }
+
+    fn anchor(&mut self, position_ms: u32) {
+        self.anchor_ms = position_ms;
+        self.anchor_at = Instant::now();
+    }
+
+    /// Fill in the details of a track another device started.
+    fn look_up_current(&mut self, uri: String, duration_ms: u32, cx: &mut Context<Self>) {
+        let api = app::api(cx);
+        self.lookup = Some(cx.spawn(async move |this, cx| {
+            let lookup_uri = uri.clone();
+            let result = runtime::run(async move { api.item(&lookup_uri).await }).await;
+            this.update(cx, |this, cx| {
+                let mut track = result.unwrap_or_else(|_| Track {
+                    uri: uri.clone().into(),
+                    id: uri
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                        .into(),
+                    ..Track::default()
+                });
+                if track.duration_ms == 0 {
+                    track.duration_ms = duration_ms;
+                }
+                this.current = Some(track);
+                cx.emit(PlayerEvent::TrackChanged);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Rebuild the mirrored "Next up" list from Spotify's queue.
+    fn refresh_queue(&mut self, cx: &mut Context<Self>) {
+        let api = app::api(cx);
+        cx.spawn(async move |this, cx| {
+            let Ok(remote) = runtime::run(async move { api.remote_queue().await }).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.queue = Queue::mirror(remote.currently_playing, remote.queue);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// Run a Web API remote-control call, surfacing failures as a toast.
+fn remote<F>(cx: &mut Context<Player>, call: F)
+where
+    F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    cx.spawn(async move |_, cx| {
+        if let Err(err) = runtime::run(call).await {
+            cx.update(|cx| app::toast_error(format!("{err:#}"), cx));
+        }
+    })
+    .detach();
+}
+
+/// Our track model from what librespot knows about the item it loaded.
+fn track_from_audio_item(item: &AudioItem) -> Track {
+    let id = item.uri.rsplit(':').next().unwrap_or_default().to_string();
+    let mut covers: Vec<_> = item.covers.iter().collect();
+    covers.sort_by_key(|c| c.width);
+    let images = Images {
+        small: covers.first().map(|c| c.url.clone().into()),
+        medium: covers.get(covers.len() / 2).map(|c| c.url.clone().into()),
+        large: covers.last().map(|c| c.url.clone().into()),
+    };
+    let mut track = Track {
+        id: id.into(),
+        uri: item.uri.clone().into(),
+        name: item.name.clone().into(),
+        duration_ms: item.duration_ms,
+        explicit: item.is_explicit,
+        is_playable: Some(true),
+        ..Track::default()
+    };
+    match &item.unique_fields {
+        UniqueFields::Track {
+            artists,
+            album,
+            number,
+            disc_number,
+            ..
+        } => {
+            track.artists = artists
+                .0
+                .iter()
+                .map(|a| ArtistRef {
+                    id: a
+                        .id
+                        .to_uri()
+                        .ok()
+                        .and_then(|uri| uri.rsplit(':').next().map(str::to_string))
+                        .unwrap_or_default()
+                        .into(),
+                    name: a.name.clone().into(),
+                })
+                .collect();
+            track.album = Some(AlbumRef {
+                name: album.clone().into(),
+                images: images.clone(),
+                ..AlbumRef::default()
+            });
+            track.track_number = *number;
+            track.disc_number = *disc_number;
+        }
+        UniqueFields::Episode { show_name, .. } => {
+            track.kind = ItemKind::Episode;
+            track.show = Some(ShowRef {
+                name: show_name.clone().into(),
+                images: images.clone(),
+                ..ShowRef::default()
+            });
+            track.images = images;
+        }
+        UniqueFields::Local { .. } => track.is_local = true,
+    }
+    track
 }

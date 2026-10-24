@@ -226,18 +226,6 @@ impl Api {
         serde_json::from_str(&text).with_context(|| format!("unexpected response from {path}"))
     }
 
-    /// GET that treats `204 No Content` as `None`.
-    pub(super) async fn get_opt<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
-        match self.send(Method::GET, path, None).await? {
-            Some(text) => {
-                Ok(Some(serde_json::from_str(&text).with_context(|| {
-                    format!("unexpected response from {path}")
-                })?))
-            }
-            None => Ok(None),
-        }
-    }
-
     pub(super) async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
         self.send(method, path, body.as_ref()).await.map(|_| ())
     }

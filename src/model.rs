@@ -463,47 +463,6 @@ impl SearchResults {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct Device {
-    #[serde(default)]
-    pub id: Option<SharedString>,
-    #[serde(default, deserialize_with = "null_default")]
-    pub name: SharedString,
-    #[serde(default, rename = "type", deserialize_with = "null_default")]
-    pub kind: SharedString,
-    #[serde(default, deserialize_with = "null_default")]
-    pub is_active: bool,
-    #[serde(default, deserialize_with = "null_default")]
-    pub is_restricted: bool,
-    #[serde(default)]
-    pub volume_percent: Option<u32>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct PlayContext {
-    #[serde(default, deserialize_with = "null_default")]
-    pub uri: SharedString,
-}
-
-/// Playback as reported by Spotify Connect, used when another device is active.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RemotePlayback {
-    #[serde(default)]
-    pub device: Option<Device>,
-    #[serde(default, deserialize_with = "null_default")]
-    pub is_playing: bool,
-    #[serde(default, deserialize_with = "null_default")]
-    pub shuffle_state: bool,
-    #[serde(default, deserialize_with = "null_default")]
-    pub repeat_state: SharedString,
-    #[serde(default, deserialize_with = "null_default")]
-    pub progress_ms: u32,
-    #[serde(default)]
-    pub item: Option<Track>,
-    #[serde(default)]
-    pub context: Option<PlayContext>,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RemoteQueue {
     #[serde(default)]

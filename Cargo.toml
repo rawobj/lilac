@@ -19,6 +19,10 @@ smallvec = "1"
 librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-playback = { version = "0.8.0", default-features = false, features = ["rodio-backend", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+librespot-connect = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = "0.8.0"
+librespot-metadata = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris-server = "0.10.0"

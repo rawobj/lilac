@@ -1,4 +1,7 @@
-//! Spotify Connect: observe and control playback on other devices.
+//! Spotify Connect: control playback on other devices.
+//!
+//! What plays where is pushed to us through the Connect cluster (see
+//! `player::backend`); these calls only send commands.
 
 use anyhow::Result;
 use reqwest::Method;
@@ -9,20 +12,6 @@ use super::Api;
 use crate::model::*;
 
 impl Api {
-    pub async fn devices(&self) -> Result<Vec<Device>> {
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            devices: Vec<Device>,
-        }
-        Ok(self.get::<Wrapper>("/me/player/devices").await?.devices)
-    }
-
-    /// Current playback, or `None` when nothing is active anywhere.
-    pub async fn playback(&self) -> Result<Option<RemotePlayback>> {
-        self.get_opt("/me/player?additional_types=track,episode")
-            .await
-    }
-
     pub async fn remote_queue(&self) -> Result<RemoteQueue> {
         self.get("/me/player/queue").await
     }
