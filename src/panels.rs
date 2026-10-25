@@ -7,6 +7,7 @@ use crate::app;
 use crate::menus::TrackMenuContext;
 use crate::model::Track;
 use crate::nav::Route;
+use crate::player::{Device, DeviceKind};
 use crate::theme;
 use crate::ui::track_row::{RowOptions, track_row};
 use crate::ui::{self, Placeholder, icons};
@@ -377,46 +378,129 @@ impl RightPanelView {
             )
     }
 
-    fn devices(&self, _: &Window, _: &mut App) -> Div {
+    fn devices(&self, _: &Window, cx: &mut App) -> Div {
+        let (devices, active, ours) = {
+            let player = app::player(cx);
+            let player = player.read(cx);
+            (
+                player.devices.clone(),
+                player.active_device.clone(),
+                player.device_id().map(str::to_string),
+            )
+        };
+        // This computer counts as current when nothing else is playing.
+        let current = active.clone().or_else(|| ours.clone());
+        let row = |ix: usize, device: Option<&Device>| -> Stateful<Div> {
+            let (id, name, kind) = match device {
+                Some(d) => (Some(d.id.clone()), d.name.clone(), d.kind),
+                None => (
+                    ours.clone(),
+                    "This computer".to_string(),
+                    DeviceKind::Computer,
+                ),
+            };
+            let is_current = if device.is_none() && current.is_none() {
+                true
+            } else {
+                id.is_some() && id == current
+            };
+            let icon = match kind {
+                DeviceKind::Computer | DeviceKind::Other => icons::LAPTOP,
+                DeviceKind::Phone => icons::SMARTPHONE,
+                DeviceKind::Speaker => icons::SPEAKER,
+                DeviceKind::Tv => icons::TV,
+            };
+            let color = if is_current {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            div()
+                .id(("device", ix))
+                .p_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded(px(theme::RADIUS_CARD))
+                .when(is_current, |d| d.bg(theme::accent_alpha(0.14)))
+                .when(!is_current, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(theme::hover_fill()))
+                })
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(24.0))
+                        .flex_none()
+                        .text_color(color),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child(name),
+                        )
+                        .when(is_current, |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child("Current device"),
+                            )
+                        }),
+                )
+                .when_some(id.filter(|_| !is_current), |d, id| {
+                    d.on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        app::player(cx).update(cx, |player, cx| player.transfer_to(&id, cx));
+                    })
+                })
+        };
+
+        let mut list = div().px_2().flex().flex_col().gap_1();
+        let this_device = devices.iter().find(|d| Some(&d.id) == ours.as_ref());
+        list = list.child(row(0, this_device));
+        let others: Vec<&Device> = devices
+            .iter()
+            .filter(|d| Some(&d.id) != ours.as_ref())
+            .collect();
+        if !others.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_1()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_muted())
+                    .child("Select another device"),
+            );
+            for (ix, device) in others.into_iter().enumerate() {
+                list = list.child(row(ix + 1, Some(device)));
+            }
+        } else if ours.is_none() && !app::session(cx).read(cx).is_demo() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child("Connecting to Spotify…"),
+            );
+        }
+
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(Self::header("Connect to a device"))
-            .child(
-                div().px_4().child(
-                    div()
-                        .p_4()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded(px(theme::RADIUS_CARD))
-                        .bg(theme::accent_alpha(0.14))
-                        .child(
-                            svg()
-                                .path(icons::LAPTOP)
-                                .size(px(28.0))
-                                .text_color(theme::accent()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_color(theme::accent())
-                                        .font_weight(FontWeight::BOLD)
-                                        .child("This computer"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .child("Current device"),
-                                ),
-                        ),
-                ),
-            )
+            .child(list)
     }
 }
 

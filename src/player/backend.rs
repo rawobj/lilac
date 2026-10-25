@@ -237,6 +237,11 @@ impl Backend {
         self.spirc.load(request).map_err(spirc_error)
     }
 
+    /// Pull playback over from whichever device has it.
+    pub fn take_over(&self) -> Result<()> {
+        self.spirc.transfer(None).map_err(spirc_error)
+    }
+
     pub fn play(&self) {
         let _ = self.spirc.play();
     }

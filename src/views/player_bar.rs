@@ -61,6 +61,10 @@ impl PlayerBar {
             return div().flex_1();
         };
         let liked = app::library(cx).read(cx).is_liked(&track.id);
+        let listening_on = app::player(cx)
+            .read(cx)
+            .remote_device()
+            .map(|d| d.name.clone());
         let album_id = track
             .album
             .as_ref()
@@ -136,7 +140,28 @@ impl PlayerBar {
                                     app::navigate(Route::Artist(id), cx);
                                 }
                             }),
-                    ),
+                    )
+                    .children(listening_on.map(|name| {
+                        div()
+                            .id("listening-on")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(theme::accent())
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path(icons::DEVICES)
+                                    .size(px(12.0))
+                                    .text_color(theme::accent()),
+                            )
+                            .child(div().truncate().child(format!("Listening on {name}")))
+                            .on_click(|_, _, cx| {
+                                app::ui(cx)
+                                    .update(cx, |ui, cx| ui.toggle_panel(RightPanel::Devices, cx))
+                            })
+                    })),
             )
             .when(!track.is_episode() && !track.is_local, |d| {
                 d.child(

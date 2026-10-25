@@ -21,7 +21,7 @@ use crate::session::{Session, SessionEvent};
 use crate::settings::Settings;
 
 use backend::{Backend, Channels, Cluster, EngineEvent, Options, Start};
-pub use backend::Device;
+pub use backend::{Device, DeviceKind};
 pub use queue::{Queue, Repeat};
 
 /// Restart the current track instead of going to the previous one past this point.
@@ -188,6 +188,11 @@ impl Player {
             return None;
         }
         self.devices.iter().find(|d| d.id == active)
+    }
+
+    /// This device's Connect id, once the session is up.
+    pub fn device_id(&self) -> Option<&str> {
+        self.backend.as_ref().map(|b| b.device_id.as_str())
     }
 
     /// Queued tracks can be removed or reordered. Spotify Connect offers no
@@ -593,6 +598,24 @@ impl Player {
         } else if let Some(track) = self.queue.skip_to_upcoming(n) {
             self.start_simulated(track, cx);
         }
+    }
+
+    /// Move playback to another Connect device, or back to this one.
+    pub fn transfer_to(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        if self.device_id() == Some(device_id) {
+            match self.backend() {
+                Some(backend) => {
+                    if let Err(err) = backend.take_over() {
+                        app::toast_error(format!("{err:#}"), cx);
+                    }
+                }
+                None => self.ensure_backend(cx),
+            }
+            return;
+        }
+        let api = app::api(cx);
+        let id = device_id.to_string();
+        remote(cx, async move { api.transfer(&id, true).await });
     }
 
     /// Connect has no "jump to"; skipping in order lands on the same track.
