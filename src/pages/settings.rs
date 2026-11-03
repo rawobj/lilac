@@ -211,7 +211,7 @@ impl Render for SettingsPage {
                 }),
             ))
             .child(row(
-                "lilac",
+                "Lilac",
                 concat!("Version ", env!("CARGO_PKG_VERSION")),
                 ui::pill_button("about", "About", false).on_click(|_, _, cx| {
                     app::ui(cx).update(cx, |ui, cx| ui.open_dialog(Dialog::About, cx))

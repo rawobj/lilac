@@ -44,7 +44,7 @@ const WEB_SCOPES: &[&str] = &[
 ];
 
 /// Shown in the browser tab once the redirect arrives.
-const DONE_MESSAGE: &str = "You are logged in to lilac. You can close this tab.";
+const DONE_MESSAGE: &str = "You are logged in to Lilac. You can close this tab.";
 
 /// One OAuth client and where its tokens are kept.
 #[derive(Clone, Debug, PartialEq, Eq)]

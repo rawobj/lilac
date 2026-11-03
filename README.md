@@ -1,4 +1,4 @@
-# lilac
+# Lilac
 
 A native Spotify client written in Rust on top of [GPUI](https://gpui.rs).
 

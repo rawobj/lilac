@@ -199,7 +199,7 @@ fn playlist(p: usize) -> Value {
         "owner": if owned {
             json!({ "id": "demo", "display_name": "Demo Listener" })
         } else {
-            json!({ "id": "lilac", "display_name": "lilac" })
+            json!({ "id": "lilac", "display_name": "Lilac" })
         },
         "collaborative": false,
         "public": false,
@@ -219,7 +219,7 @@ fn show(s: usize) -> Value {
         "id": format!("sh{s}"),
         "uri": format!("spotify:show:sh{s}"),
         "name": names[s % names.len()],
-        "publisher": "lilac demo",
+        "publisher": "Lilac demo",
         "description": "A demo podcast. The episodes are placeholders and carry no audio.",
         "images": [],
         "total_episodes": 12,

@@ -129,7 +129,7 @@ impl Render for LoginView {
                                 div()
                                     .text_3xl()
                                     .font_weight(FontWeight::BOLD)
-                                    .child("lilac"),
+                                    .child("Lilac"),
                             )
                             .child(
                                 div()

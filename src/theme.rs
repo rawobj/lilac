@@ -120,7 +120,7 @@ pub fn init_fonts(cx: &App) {
         .map(|bytes| std::borrow::Cow::Borrowed(*bytes))
         .collect();
     if let Err(err) = cx.text_system().add_fonts(fonts) {
-        eprintln!("lilac: could not load bundled fonts: {err}");
+        eprintln!("Lilac: could not load bundled fonts: {err}");
     }
 }
 

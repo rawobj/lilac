@@ -156,7 +156,7 @@ impl Backend {
             .map_err(|e| anyhow!("could not listen for Connect updates: {e}"))?;
 
         let connect = ConnectConfig {
-            name: "lilac".into(),
+            name: "Lilac".into(),
             device_type: DeviceType::Computer,
             initial_volume: to_mixer(volume),
             ..ConnectConfig::default()

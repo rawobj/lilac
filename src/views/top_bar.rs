@@ -59,7 +59,7 @@ impl TopBar {
                 app::ui(cx).update(cx, |ui, cx| ui.open_dialog(Dialog::Shortcuts, cx))
             })
             .separated(),
-            MenuItem::new(icons::INFO, "About lilac", |_, cx| {
+            MenuItem::new(icons::INFO, "About Lilac", |_, cx| {
                 app::ui(cx).update(cx, |ui, cx| ui.open_dialog(Dialog::About, cx))
             }),
             MenuItem::new(icons::LOG_OUT, "Log out", |_, cx| {

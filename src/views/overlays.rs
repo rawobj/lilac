@@ -267,7 +267,7 @@ pub fn dialog(
             ("Keyboard shortcuts", grid.into_any_element(), None)
         }
         Dialog::About => (
-            "About lilac",
+            "About Lilac",
             div()
                 .flex()
                 .flex_col()

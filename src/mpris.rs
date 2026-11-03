@@ -34,7 +34,7 @@ pub fn init(cx: &mut App) {
     }
     cx.spawn(async move |cx| {
         let Ok(bus) = Bus::builder("lilac")
-            .identity("lilac")
+            .identity("Lilac")
             .desktop_entry("lilac")
             .can_raise(true)
             .can_play(true)

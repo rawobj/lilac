@@ -43,7 +43,7 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("lilac".into()),
+                    title: Some("Lilac".into()),
                     appears_transparent: true,
                     traffic_light_position: None,
                 }),
