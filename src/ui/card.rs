@@ -1,5 +1,6 @@
 //! Artwork cards and the horizontal shelves they sit in.
 
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::*;
 
 use super::{Placeholder, cover, play_button};
@@ -101,25 +102,95 @@ pub fn shelf(
     id: impl Into<ElementId>,
     title: impl Into<SharedString>,
     cards: Vec<AnyElement>,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .px_6()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::text())
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .id(id)
-                .px_3()
-                .flex()
-                .overflow_x_scroll()
-                .children(cards),
-        )
+) -> Shelf {
+    Shelf {
+        id: id.into(),
+        title: title.into(),
+        cards,
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Shelf {
+    id: ElementId,
+    title: SharedString,
+    cards: Vec<AnyElement>,
+}
+
+impl RenderOnce for Shelf {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let scroll = window
+            .use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .px_6()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child(self.title),
+            )
+            .child(
+                div()
+                    .id(self.id)
+                    .group("shelf")
+                    .relative()
+                    .child(
+                        div()
+                            .id("row")
+                            .px_3()
+                            .flex()
+                            .overflow_x_scroll()
+                            // Vertical wheel and swipes belong to the page, sideways ones to the shelf.
+                            .restrict_scroll_to_axis()
+                            .track_scroll(&scroll)
+                            .on_scroll_wheel(shift_scrolls_sideways(scroll.clone()))
+                            .children(self.cards),
+                    )
+                    // A thin bar while the pointer is over the shelf: shows there is
+                    // more to the side and can be dragged with a mouse.
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(theme::GAP * 3.0))
+                            .right(px(theme::GAP * 3.0))
+                            .bottom_0()
+                            .h(px(10.0))
+                            .invisible()
+                            .group_hover("shelf", |s| s.visible())
+                            .child(
+                                Scrollbar::horizontal(&scroll)
+                                    .id("bar")
+                                    .mode(ScrollbarMode::Always),
+                            ),
+                    ),
+            )
+    }
+}
+
+/// Shift + wheel scrolls a horizontal row, as in browsers. Wayland does not
+/// translate it for us, and a mouse wheel has no other way to reach the row.
+pub fn shift_scrolls_sideways(
+    scroll: ScrollHandle,
+) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        if !event.modifiers.shift {
+            return;
+        }
+        let delta = event.delta.pixel_delta(window.line_height());
+        if delta.y.is_zero() || !delta.x.is_zero() {
+            return;
+        }
+        let mut offset = scroll.offset();
+        let max = scroll.max_offset().x;
+        offset.x = (offset.x + delta.y).clamp(-max, px(0.0));
+        scroll.set_offset(offset);
+        cx.stop_propagation();
+        window.refresh();
+    }
 }

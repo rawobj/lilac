@@ -140,6 +140,7 @@ impl Render for LyricsPage {
                     .id("lyrics")
                     .size_full()
                     .overflow_y_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.scroll)
                     .px_12()
                     .py_10()

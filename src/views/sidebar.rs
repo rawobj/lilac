@@ -11,6 +11,7 @@ use crate::model::*;
 use crate::nav::Route;
 use crate::player::PlayerEvent;
 use crate::theme;
+use crate::ui::card::shift_scrolls_sideways;
 use crate::ui::{self, Placeholder, WithTooltip, icons};
 use crate::ui_state::Dialog;
 
@@ -136,6 +137,7 @@ pub struct Sidebar {
     search: Entity<InputState>,
     entries: Vec<Entry>,
     scroll: UniformListScrollHandle,
+    chips_scroll: ScrollHandle,
 }
 
 impl Sidebar {
@@ -164,6 +166,7 @@ impl Sidebar {
             search,
             entries: Vec::new(),
             scroll: UniformListScrollHandle::new(),
+            chips_scroll: ScrollHandle::new(),
         };
         this.rebuild(cx);
         this
@@ -426,7 +429,10 @@ impl Render for Sidebar {
                 .pb_2()
                 .flex()
                 .gap_2()
-                .overflow_x_scroll();
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(&self.chips_scroll)
+                .on_scroll_wheel(shift_scrolls_sideways(self.chips_scroll.clone()));
             for (filter, label) in FILTERS {
                 row = row.child(
                     ui::chip(label, label, self.filter == Some(filter))

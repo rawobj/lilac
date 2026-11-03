@@ -56,6 +56,7 @@ pub fn scroll_page(id: &'static str, handle: &ScrollHandle, content: impl IntoEl
                 .id(id)
                 .size_full()
                 .overflow_y_scroll()
+                .restrict_scroll_to_axis()
                 .track_scroll(handle)
                 .child(content),
         )

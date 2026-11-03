@@ -251,6 +251,7 @@ impl RightPanelView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.scroll)
                     .child(body),
             )
@@ -373,6 +374,7 @@ impl RightPanelView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.scroll)
                     .child(body),
             )
@@ -548,6 +550,7 @@ impl RightPanelView {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .restrict_scroll_to_axis()
                         .child(rows),
                 )
             }

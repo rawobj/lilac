@@ -23,6 +23,7 @@ pub fn menu(cx: &mut App) -> Option<impl IntoElement + use<>> {
         .max_w(px(320.0))
         .max_h(px(420.0))
         .overflow_y_scroll()
+        .restrict_scroll_to_axis()
         .p_1()
         .flex()
         .flex_col();
@@ -288,6 +289,7 @@ pub fn dialog(
         .w(px(440.0))
         .max_h(px(560.0))
         .overflow_y_scroll()
+        .restrict_scroll_to_axis()
         .p_6()
         .flex()
         .flex_col()
