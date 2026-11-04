@@ -43,8 +43,13 @@ pub struct CollectionPage {
 impl CollectionPage {
     pub fn new(source: Source, cx: &mut Context<Self>) -> Self {
         let library = app::library(cx);
-        cx.subscribe(&app::player(cx), |_, _, _: &PlayerEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&app::player(cx), |_, _, event: &PlayerEvent, cx| {
+            // Rows show what plays and whether it is paused, not where in the track.
+            if !matches!(event, PlayerEvent::Seeked) {
+                cx.notify()
+            }
+        })
+        .detach();
         cx.observe(&library, |this: &mut Self, _, cx| {
             if this.source == Source::Liked {
                 this.sync_liked(cx);

@@ -7,7 +7,7 @@ use crate::app;
 use crate::menus::TrackMenuContext;
 use crate::model::Track;
 use crate::nav::Route;
-use crate::player::{Device, DeviceKind};
+use crate::player::{Device, DeviceKind, Player};
 use crate::theme;
 use crate::ui::track_row::{RowOptions, track_row};
 use crate::ui::{self, Placeholder, icons};
@@ -15,12 +15,47 @@ use crate::ui_state::RightPanel;
 
 pub struct RightPanelView {
     scroll: ScrollHandle,
+    shown: u64,
+}
+
+/// A fingerprint of the player state the panel draws.
+fn shown_state(player: &Player) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    player.current.as_ref().map(|t| &t.uri).hash(&mut h);
+    (player.playing, player.loading).hash(&mut h);
+    player.queue.context_name.hash(&mut h);
+    for track in player
+        .queue
+        .user
+        .iter()
+        .chain(player.queue.upcoming().take(60))
+    {
+        track.uri.hash(&mut h);
+    }
+    for device in &player.devices {
+        (&device.id, &device.name).hash(&mut h);
+    }
+    player.active_device.hash(&mut h);
+    player.device_id().hash(&mut h);
+    std::mem::discriminant(&player.repeat).hash(&mut h);
+    player.remote_device().is_some().hash(&mut h);
+    player.queue_editable().hash(&mut h);
+    h.finish()
 }
 
 impl RightPanelView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        cx.observe(&app::player(cx), |_, _, cx| cx.notify())
-            .detach();
+        // The player changes on every volume step and position report; only
+        // re-render when something this panel shows is different.
+        cx.observe(&app::player(cx), |this: &mut Self, player, cx| {
+            let shown = shown_state(player.read(cx));
+            if shown != this.shown {
+                this.shown = shown;
+                cx.notify();
+            }
+        })
+        .detach();
         cx.observe(&app::library(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&app::ui(cx), |_, _, cx| cx.notify()).detach();
@@ -28,6 +63,7 @@ impl RightPanelView {
             .detach();
         Self {
             scroll: ScrollHandle::new(),
+            shown: 0,
         }
     }
 

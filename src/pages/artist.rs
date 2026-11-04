@@ -28,8 +28,13 @@ pub struct ArtistPage {
 
 impl ArtistPage {
     pub fn new(id: SharedString, cx: &mut Context<Self>) -> Self {
-        cx.subscribe(&app::player(cx), |_, _, _: &PlayerEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&app::player(cx), |_, _, event: &PlayerEvent, cx| {
+            // Rows show what plays and whether it is paused, not where in the track.
+            if !matches!(event, PlayerEvent::Seeked) {
+                cx.notify()
+            }
+        })
+        .detach();
         cx.observe(&app::library(cx), |_, _, cx| cx.notify())
             .detach();
 

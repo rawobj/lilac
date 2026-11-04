@@ -155,8 +155,13 @@ impl Sidebar {
             .detach();
         cx.observe(&app::ui(cx), |_, _, cx| cx.notify()).detach();
         cx.observe(&app::nav(cx), |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&app::player(cx), |_, _, _: &PlayerEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&app::player(cx), |_, _, event: &PlayerEvent, cx| {
+            // Rows show what plays and whether it is paused, not where in the track.
+            if !matches!(event, PlayerEvent::Seeked) {
+                cx.notify()
+            }
+        })
+        .detach();
 
         let mut this = Self {
             filter: None,

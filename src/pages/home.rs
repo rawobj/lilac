@@ -27,8 +27,13 @@ impl HomePage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.observe(&app::library(cx), |_, _, cx| cx.notify())
             .detach();
-        cx.subscribe(&app::player(cx), |_, _, _: &PlayerEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&app::player(cx), |_, _, event: &PlayerEvent, cx| {
+            // Rows show what plays and whether it is paused, not where in the track.
+            if !matches!(event, PlayerEvent::Seeked) {
+                cx.notify()
+            }
+        })
+        .detach();
 
         let mut this = Self {
             recent: Vec::new(),

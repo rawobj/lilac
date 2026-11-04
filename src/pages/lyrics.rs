@@ -25,7 +25,8 @@ pub struct LyricsPage {
     state: State,
     active: Option<usize>,
     scroll: ScrollHandle,
-    _clock: Task<()>,
+    /// Runs only while playing, so a paused or idle app does no work.
+    clock: Option<Task<()>>,
 }
 
 impl LyricsPage {
@@ -36,31 +37,41 @@ impl LyricsPage {
         )
         .detach();
 
-        // Advance the highlighted line. Cheap: it only repaints when the line changes.
-        let clock = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
-                    break;
-                }
-            }
-        });
-
         let mut this = Self {
             track_id: SharedString::default(),
             state: State::Idle,
             active: None,
             scroll: ScrollHandle::new(),
-            _clock: clock,
+            clock: None,
         };
         this.sync(cx);
         this
     }
 
+    /// Advance the highlighted line while playing. Cheap: it only repaints
+    /// when the line changes.
+    fn sync_clock(&mut self, cx: &mut Context<Self>) {
+        let playing = app::player(cx).read(cx).playing;
+        if !playing {
+            self.clock = None;
+        } else if self.clock.is_none() {
+            self.clock = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                    if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
     /// Load lyrics when the current track changes.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.sync_clock(cx);
+        self.tick(cx);
         let Some(track) = app::player(cx).read(cx).current.clone() else {
             self.track_id = SharedString::default();
             self.state = State::Idle;
