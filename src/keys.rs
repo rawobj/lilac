@@ -102,13 +102,11 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &VolumeUp, cx| {
         app::player(cx).update(cx, |p, cx| {
             p.set_volume(p.volume + 0.05, cx);
-            p.persist_volume(cx);
         })
     });
     cx.on_action(|_: &VolumeDown, cx| {
         app::player(cx).update(cx, |p, cx| {
             p.set_volume(p.volume - 0.05, cx);
-            p.persist_volume(cx);
         })
     });
     cx.on_action(|_: &ToggleMute, cx| app::player(cx).update(cx, |p, cx| p.toggle_mute(cx)));

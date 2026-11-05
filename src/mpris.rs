@@ -133,7 +133,6 @@ fn handle(request: Request, cx: &mut App) {
         Request::SetPosition(ms) => p.seek(ms.max(0) as u32, cx),
         Request::Volume(v) => {
             p.set_volume(v as f32, cx);
-            p.persist_volume(cx);
         }
         Request::Shuffle(on) => {
             if p.shuffle() != on {

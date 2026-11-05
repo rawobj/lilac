@@ -10,7 +10,7 @@ use crate::model::format_duration;
 use crate::nav::Route;
 use crate::player::Repeat;
 use crate::theme;
-use crate::ui::slider::slider;
+use crate::ui::slider::{SliderChange, slider};
 use crate::ui::{self, Placeholder, WithTooltip, icons};
 use crate::ui_state::RightPanel;
 
@@ -38,6 +38,8 @@ impl PlayerBar {
     }
 
     /// Repaint twice a second while playing, and not at all while paused.
+    /// Ticks land on the track's own second boundaries, so the elapsed time
+    /// turns over when the audio does rather than up to half a second late.
     fn sync_clock(&mut self, cx: &mut Context<Self>) {
         let playing = app::player(cx).read(cx).playing;
         if !playing {
@@ -45,8 +47,17 @@ impl PlayerBar {
         } else if self.clock.is_none() {
             self.clock = Some(cx.spawn(async move |this, cx| {
                 loop {
+                    let Ok(position) =
+                        this.update(cx, |_, cx| app::player(cx).read(cx).position_ms())
+                    else {
+                        break;
+                    };
+                    let mut wait = 1000 - position % 1000;
+                    if wait > 500 {
+                        wait -= 500;
+                    }
                     cx.background_executor()
-                        .timer(Duration::from_millis(500))
+                        .timer(Duration::from_millis(wait as u64 + 5))
                         .await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
@@ -201,14 +212,6 @@ impl PlayerBar {
             )
         };
 
-        // A drag that has ended is committed here, on the first frame after release.
-        if let Some(fraction) = self.scrub
-            && !cx.has_active_drag()
-        {
-            self.scrub = None;
-            let target = (fraction * duration as f32) as u32;
-            player.update(cx, |p, cx| p.seek(target, cx));
-        }
         let shown = match self.scrub {
             Some(fraction) => (fraction * duration as f32) as u32,
             None => position,
@@ -304,12 +307,13 @@ impl PlayerBar {
                 div().flex_1().child(slider(
                     "seek",
                     fraction,
-                    cx.listener(|this, (value, dragging): &(f32, bool), _, cx| {
-                        if *dragging {
-                            this.scrub = Some(*value);
+                    cx.listener(|this, change: &SliderChange, _, cx| match *change {
+                        SliderChange::Preview(value) => {
+                            this.scrub = Some(value);
                             cx.notify();
-                        } else {
-                            let value = *value;
+                        }
+                        SliderChange::Commit(value) => {
+                            this.scrub = None;
                             app::player(cx).update(cx, |p, cx| {
                                 let target = (value * p.duration_ms() as f32) as u32;
                                 p.seek(target, cx)
@@ -317,8 +321,8 @@ impl PlayerBar {
                         }
                     })
                     .pipe(|listener| {
-                        move |value, dragging, window: &mut Window, cx: &mut App| {
-                            listener(&(value, dragging), window, cx)
+                        move |change, window: &mut Window, cx: &mut App| {
+                            listener(&change, window, cx)
                         }
                     }),
                 )),
@@ -405,13 +409,9 @@ impl PlayerBar {
             .child(
                 div()
                     .w(px(96.0))
-                    .child(slider("volume", level, |value, dragging, _, cx| {
-                        app::player(cx).update(cx, |p, cx| {
-                            p.set_volume(value, cx);
-                            if !dragging {
-                                p.persist_volume(cx);
-                            }
-                        })
+                    .child(slider("volume", level, |change, _, cx| {
+                        let (SliderChange::Preview(value) | SliderChange::Commit(value)) = change;
+                        app::player(cx).update(cx, |p, cx| p.set_volume(value, cx))
                     })),
             )
             .child(

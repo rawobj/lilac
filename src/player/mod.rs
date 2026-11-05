@@ -8,6 +8,7 @@
 
 mod backend;
 pub mod queue;
+mod sink;
 
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,16 @@ const RESTART_THRESHOLD_MS: u32 = 3000;
 /// Connect the streaming session this long after login, once the first
 /// screen has what it needs from the network.
 const CONNECT_DELAY: Duration = Duration::from_secs(2);
+/// Spirc handles one command at a time and uploads its state after each, so
+/// a burst of seeks or volume steps would queue up network round trips.
+/// Bursts are collapsed: the first change goes out at once, the last one
+/// after this much quiet.
+const COMMAND_SETTLE: Duration = Duration::from_millis(400);
+/// Resting the pointer on a track this long starts fetching it.
+const HOVER_PRELOAD: Duration = Duration::from_millis(150);
+/// Volume reports from Spotify this soon after a local change are echoes of
+/// older steps and would make the slider jump back.
+const VOLUME_ECHO: Duration = Duration::from_millis(1500);
 
 pub enum PlayerEvent {
     /// A different track became current.
@@ -77,6 +88,21 @@ pub struct Player {
     /// Upcoming URIs the mirrored queue was built from.
     mirrored_next: Vec<String>,
     lookup: Option<Task<()>>,
+    /// Announces the volume once a gesture settles.
+    volume_sync: Option<Task<()>>,
+    volume_changed_at: Option<Instant>,
+    /// A seek waiting for the previous one to settle, and the timer for it.
+    pending_seek: Option<u32>,
+    seek_settle: Option<Task<()>>,
+    hover_preload: Option<Task<()>>,
+    queue_refresh: Option<Task<()>>,
+    /// Track URIs of the context we started, in order, to find the next
+    /// track without waiting for the Web API (which lags by seconds).
+    started_tracks: Vec<String>,
+    /// librespot itself is the active device in this session. Spotify's
+    /// device list may still name us active from an earlier run, and
+    /// librespot ignores loads until it has been activated itself.
+    spirc_active: bool,
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
@@ -127,6 +153,14 @@ impl Player {
             liked_uri: None,
             mirrored_next: Vec::new(),
             lookup: None,
+            volume_sync: None,
+            volume_changed_at: None,
+            pending_seek: None,
+            seek_settle: None,
+            hover_preload: None,
+            queue_refresh: None,
+            started_tracks: Vec::new(),
+            spirc_active: false,
         }
     }
 
@@ -280,6 +314,7 @@ impl Player {
             });
             return;
         }
+        self.started_tracks = uris.clone();
         self.load(
             PendingLoad {
                 context: context_uri,
@@ -288,6 +323,83 @@ impl Player {
             },
             cx,
         );
+    }
+
+    /// Before the first play, every connection a track needs (CDN, audio
+    /// keys, storage lookups) is still cold, which adds a second or more.
+    /// Preloading the last played track opens them, and makes picking up
+    /// where the user left off start at once.
+    fn warm_up(&mut self, cx: &mut Context<Self>) {
+        if self.current.is_some() {
+            return;
+        }
+        let api = app::api(cx);
+        cx.spawn(async move |this, cx| {
+            let Ok(recent) = runtime::run(async move { api.recently_played().await }).await else {
+                return;
+            };
+            this.update(cx, |this, _| {
+                if this.current.is_some() {
+                    return;
+                }
+                if let (Some(backend), Some(track)) =
+                    (this.backend(), recent.iter().find(|t| t.playable()))
+                {
+                    backend.preload(&track.uri);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Start fetching a track right away, e.g. on the first click of a
+    /// double click, before the user has committed to playing it.
+    pub fn prefetch_track(&mut self, uri: &str) {
+        self.prepare_to_play();
+        if self.remote_device().is_none()
+            && let Some(backend) = self.backend()
+        {
+            backend.preload(uri);
+        }
+    }
+
+    /// The user is about to play something here (a play button or a track
+    /// is being pressed). Becoming the active device costs a round trip to
+    /// Spotify that librespot must finish before it loads anything, so it is
+    /// started now rather than after the click. Only when no other device
+    /// is playing: that one would stop.
+    pub fn prepare_to_play(&mut self) {
+        if self.spirc_active || self.remote_device().is_some() {
+            return;
+        }
+        if let Some(backend) = self.backend()
+            && backend.activate().is_ok()
+        {
+            // Spirc handles commands in order, so a load sent after this
+            // finds the device active.
+            self.spirc_active = true;
+        }
+    }
+
+    /// The pointer rests on a track row (or left it, with `None`). A track
+    /// takes several sequential round trips to start; fetching it while the
+    /// user is still deciding hides most of them.
+    pub fn hover_track(&mut self, uri: Option<SharedString>, cx: &mut Context<Self>) {
+        self.hover_preload = None;
+        let Some(uri) = uri else { return };
+        if self.backend().is_none() || self.remote_device().is_some() {
+            return;
+        }
+        self.hover_preload = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_PRELOAD).await;
+            this.update(cx, |this, _| {
+                if let Some(backend) = this.backend() {
+                    backend.preload(&uri);
+                }
+            })
+            .ok();
+        }));
     }
 
     /// More tracks of `context` arrived, e.g. the next page of a long playlist.
@@ -364,7 +476,13 @@ impl Player {
                 api.remote_play(None, None, None, None, 0).await
             });
         } else if let Some(backend) = self.backend() {
-            backend.play();
+            // Spotify forgets the active device after a while paused, and
+            // librespot ignores Play until it is active again.
+            if self.spirc_active {
+                backend.play();
+            } else if let Err(err) = backend.take_over() {
+                app::toast_error(format!("{err:#}"), cx);
+            }
         } else if let Some(track) = self.current.clone() {
             // The session dropped while paused: pick up where we were.
             let position = self.anchor_ms;
@@ -452,14 +570,43 @@ impl Player {
         let position_ms = position_ms.min(self.duration_ms());
         self.anchor_ms = position_ms;
         self.anchor_at = Instant::now();
+        if self.seek_settle.is_some() {
+            self.pending_seek = Some(position_ms);
+        } else {
+            self.send_seek(position_ms, cx);
+            // While seeks keep coming, send at most one per settle period.
+            self.seek_settle = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(COMMAND_SETTLE).await;
+                    let sent = this
+                        .update(cx, |this, cx| match this.pending_seek.take() {
+                            Some(position_ms) => {
+                                this.send_seek(position_ms, cx);
+                                true
+                            }
+                            None => {
+                                this.seek_settle = None;
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !sent {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.emit(PlayerEvent::Seeked);
+        cx.notify();
+    }
+
+    fn send_seek(&mut self, position_ms: u32, cx: &mut Context<Self>) {
         if self.remote_device().is_some() {
             let api = app::api(cx);
             remote(cx, async move { api.remote_seek(position_ms).await });
         } else if let Some(backend) = self.backend() {
             backend.seek(position_ms);
         }
-        cx.emit(PlayerEvent::Seeked);
-        cx.notify();
     }
 
     /// Seek relative to the current position.
@@ -468,23 +615,13 @@ impl Player {
         self.seek(target, cx);
     }
 
+    /// Takes effect at once; Spotify and the settings file hear about it
+    /// once the gesture settles.
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume.clamp(0.0, 1.0);
         self.muted = false;
         self.apply_volume(cx);
         cx.notify();
-    }
-
-    /// Write the volume to disk. Called when a drag ends rather than on every step.
-    pub fn persist_volume(&self, cx: &mut Context<Self>) {
-        let volume = self.volume;
-        app::update_settings(cx, |settings| settings.volume = volume);
-        if self.remote_device().is_some() {
-            // One request per gesture, not per drag step.
-            let api = app::api(cx);
-            let percent = (self.effective_volume() * 100.0).round() as u32;
-            remote(cx, async move { api.remote_volume(percent).await });
-        }
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
@@ -712,6 +849,7 @@ impl Player {
             backend.shutdown();
         }
         self.listeners.clear();
+        self.spirc_active = false;
         self.starting = None;
         self.pending = None;
     }
@@ -741,9 +879,14 @@ impl Player {
         match self.backend() {
             Some(backend) => {
                 let shuffle = self.connect_shuffle;
-                if let Err(err) =
-                    backend.load(load.context.as_deref(), &load.tracks, load.start, shuffle)
-                {
+                let active = self.spirc_active;
+                if let Err(err) = backend.load(
+                    load.context.as_deref(),
+                    &load.tracks,
+                    load.start,
+                    shuffle,
+                    active,
+                ) {
                     app::toast_error(format!("{err:#}"), cx);
                 }
             }
@@ -754,10 +897,29 @@ impl Player {
         }
     }
 
-    fn apply_volume(&mut self, _cx: &mut Context<Self>) {
+    fn apply_volume(&mut self, cx: &mut Context<Self>) {
+        self.volume_changed_at = Some(Instant::now());
         if self.remote_device().is_none()
             && let Some(backend) = self.backend()
         {
+            backend.set_local_volume(self.effective_volume());
+        }
+        self.volume_sync = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMMAND_SETTLE).await;
+            this.update(cx, |this, cx| this.sync_volume(cx)).ok();
+        }));
+    }
+
+    /// Tell Spotify (and the settings file) where the volume ended up.
+    fn sync_volume(&mut self, cx: &mut Context<Self>) {
+        self.volume_sync = None;
+        let volume = self.volume;
+        app::update_settings(cx, |settings| settings.volume = volume);
+        if self.remote_device().is_some() {
+            let api = app::api(cx);
+            let percent = (self.effective_volume() * 100.0).round() as u32;
+            remote(cx, async move { api.remote_volume(percent).await });
+        } else if let Some(backend) = self.backend() {
             backend.set_volume(self.effective_volume());
         }
     }
@@ -783,6 +945,10 @@ impl Player {
                     Ok((backend, channels)) => {
                         this.listen(channels, cx);
                         this.backend = Some(backend);
+                        // Our own registration needs a moment to show up in the list.
+                        this.refresh_devices(Duration::from_millis(1500), cx);
+                        // Open the connections a first play needs.
+                        this.warm_up(cx);
                         if let Some(load) = this.pending.take() {
                             this.load(load, cx);
                         }
@@ -838,14 +1004,32 @@ impl Player {
 
     /// Events from this device's own player.
     fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
+        // Only the active device plays; Spotify will not tell us so itself.
+        if matches!(
+            event,
+            EngineEvent::Loading { .. } | EngineEvent::Playing { .. }
+        ) {
+            self.mark_active();
+        }
         if self.remote_device().is_some() {
             return;
         }
         match event {
             EngineEvent::TrackChanged { audio_item } => {
-                self.current = Some(track_from_audio_item(&audio_item));
+                // Prefer what the Web API told us about this track (it has
+                // album and artist ids) over librespot's thinner metadata.
+                let known = self
+                    .current
+                    .iter()
+                    .chain(self.queue.upcoming().take(5))
+                    .find(|t| t.uri.as_ref() == audio_item.uri)
+                    .cloned();
+                self.current = Some(known.unwrap_or_else(|| track_from_audio_item(&audio_item)));
                 self.anchor_ms = 0;
                 self.anchor_at = Instant::now();
+                // Spotify does not push our own changes; read what comes next.
+                self.refresh_queue(cx);
+                self.preload_next_started();
                 cx.emit(PlayerEvent::TrackChanged);
                 cx.notify();
             }
@@ -897,9 +1081,16 @@ impl Player {
                 cx.notify();
             }
             EngineEvent::VolumeChanged { volume } => {
-                self.volume = backend::from_mixer(volume);
-                self.muted = false;
-                cx.notify();
+                // Our own changes come back here too, late and possibly stale.
+                let echo = self.volume_sync.is_some()
+                    || self
+                        .volume_changed_at
+                        .is_some_and(|at| at.elapsed() < VOLUME_ECHO);
+                if !echo && !(self.muted && volume == 0) {
+                    self.volume = backend::from_mixer(volume);
+                    self.muted = false;
+                    cx.notify();
+                }
             }
             _ => {}
         }
@@ -907,6 +1098,9 @@ impl Player {
 
     /// Spotify's view of all devices, pushed on every change.
     fn on_cluster(&mut self, update: Cluster, cx: &mut Context<Self>) {
+        if update.active_device.as_deref() != self.device_id() {
+            self.spirc_active = false;
+        }
         self.devices = update.devices;
         self.active_device = update.active_device;
         let Some(playback) = update.playback else {
@@ -940,6 +1134,72 @@ impl Player {
             self.refresh_queue(cx);
         }
         cx.notify();
+    }
+
+    /// This device is the one playing.
+    fn mark_active(&mut self) {
+        self.spirc_active = true;
+        let Some(id) = self.device_id().map(str::to_string) else {
+            return;
+        };
+        self.active_device = Some(id.clone());
+        if !self.devices.iter().any(|d| d.id == id) {
+            self.devices.push(Device {
+                id,
+                name: "Lilac".into(),
+                kind: DeviceKind::Computer,
+            });
+        }
+    }
+
+    /// Read the device list once. Later changes by other devices are pushed
+    /// through the cluster, but Spotify never pushes the state we caused,
+    /// and nothing at all until some other device changes.
+    pub fn refresh_devices(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.backend.is_none() {
+            return;
+        }
+        let api = app::api(cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let Ok(list) = runtime::run(async move { api.remote_devices().await }).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let mut devices: Vec<Device> = list
+                    .devices
+                    .iter()
+                    .filter(|d| !d.is_restricted)
+                    .filter_map(|d| {
+                        Some(Device {
+                            id: d.id.clone()?,
+                            name: d.name.clone(),
+                            kind: match d.kind.to_ascii_lowercase().as_str() {
+                                "computer" => DeviceKind::Computer,
+                                "smartphone" | "tablet" => DeviceKind::Phone,
+                                "speaker" | "avr" | "stb" | "audiodongle" => DeviceKind::Speaker,
+                                "tv" | "castvideo" => DeviceKind::Tv,
+                                _ => DeviceKind::Other,
+                            },
+                        })
+                    })
+                    .collect();
+                devices.sort_by(|a, b| a.name.cmp(&b.name));
+                this.devices = devices;
+                this.active_device = list
+                    .devices
+                    .iter()
+                    .find(|d| d.is_active)
+                    .and_then(|d| d.id.clone())
+                    .or(this.active_device.take());
+                if this.spirc_active {
+                    this.mark_active();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn anchor(&mut self, position_ms: u32) {
@@ -978,17 +1238,77 @@ impl Player {
     /// Rebuild the mirrored "Next up" list from Spotify's queue.
     fn refresh_queue(&mut self, cx: &mut Context<Self>) {
         let api = app::api(cx);
-        cx.spawn(async move |this, cx| {
-            let Ok(remote) = runtime::run(async move { api.remote_queue().await }).await else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                this.queue = Queue::mirror(remote.currently_playing, remote.queue);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.queue_refresh = Some(cx.spawn(async move |this, cx| {
+            // The Web API learns about a track change seconds after the
+            // player does; until then it reports the previous track's queue.
+            for attempt in 0..6 {
+                if attempt > 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(800))
+                        .await;
+                }
+                let api = api.clone();
+                let Ok(remote) = runtime::run(async move { api.remote_queue().await }).await else {
+                    return;
+                };
+                let done = this
+                    .update(cx, |this, cx| {
+                        let expected = this.current.as_ref().map(|t| t.uri.clone());
+                        let reported = remote.currently_playing.as_ref().map(|t| t.uri.clone());
+                        if expected.is_some() && reported != expected && attempt < 5 {
+                            return false;
+                        }
+                        this.apply_remote_queue(remote, cx);
+                        true
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// In the context we started ourselves the next track is known at once.
+    /// Shuffle and queued tracks change the order, so then the Web API's
+    /// queue decides (see `apply_remote_queue`).
+    fn preload_next_started(&self) {
+        if self.connect_shuffle || self.remote_device().is_some() {
+            return;
+        }
+        let Some(current) = &self.current else { return };
+        let Some(ix) = self
+            .started_tracks
+            .iter()
+            .position(|u| *u == current.uri.as_ref())
+        else {
+            return;
+        };
+        if let (Some(backend), Some(next)) = (self.backend(), self.started_tracks.get(ix + 1)) {
+            backend.preload(next);
+        }
+    }
+
+    fn apply_remote_queue(&mut self, remote: crate::model::RemoteQueue, cx: &mut Context<Self>) {
+        // librespot's metadata has no album or artist ids; the Web API's has,
+        // which the title and artist links and the Now Playing panel need.
+        if let (Some(current), Some(full)) = (&self.current, &remote.currently_playing)
+            && current.uri == full.uri
+            && current.album.as_ref().is_none_or(|a| a.id.is_empty())
+        {
+            self.current = Some(full.clone());
+            cx.emit(PlayerEvent::TrackChanged);
+        }
+        // Fetch the start of the next track now, so Next and the change at
+        // the end of this one do not wait on the network.
+        if self.remote_device().is_none()
+            && let (Some(backend), Some(next)) = (self.backend(), remote.queue.first())
+            && next.playable()
+        {
+            backend.preload(&next.uri);
+        }
+        self.queue = Queue::mirror(remote.currently_playing, remote.queue);
+        cx.notify();
     }
 }
 

@@ -3,21 +3,18 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::theme;
 
-/// Payload carried while a slider thumb is being dragged.
-#[derive(Clone)]
-struct SliderDrag(ElementId);
-
-/// Invisible drag preview; the slider itself is the feedback.
-struct DragGhost;
-
-impl Render for DragGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
+/// What a slider gesture reports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SliderChange {
+    /// The thumb is held at this value; the gesture is not over yet.
+    Preview(f32),
+    /// The button was released here.
+    Commit(f32),
 }
 
 fn ratio(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
@@ -27,84 +24,149 @@ fn ratio(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
     ((position.x - bounds.origin.x) / bounds.size.width).clamp(0.0, 1.0)
 }
 
-/// `on_change` receives the new value in `0.0..=1.0` and whether it came from
-/// a drag (`true`) or a click (`false`).
+/// `on_change` gets values in `0.0..=1.0`: previews while the button is held
+/// (including the press itself), then one commit on release.
 pub fn slider(
     id: impl Into<ElementId>,
     value: f32,
-    on_change: impl Fn(f32, bool, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let id: ElementId = id.into();
-    let value = value.clamp(0.0, 1.0);
-    let on_change = Rc::new(on_change);
-    let bounds = Rc::new(Cell::new(Bounds::default()));
+    on_change: impl Fn(SliderChange, &mut Window, &mut App) + 'static,
+) -> Slider {
+    Slider {
+        id: id.into(),
+        value: value.clamp(0.0, 1.0),
+        on_change: Rc::new(on_change),
+    }
+}
 
-    div()
-        .id(id.clone())
-        .group("slider")
-        .relative()
-        .w_full()
-        .h(px(16.0))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .child(
-            canvas(
-                {
-                    let bounds = bounds.clone();
-                    move |b, _, _| bounds.set(b)
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(4.0))
-                .rounded_full()
-                .bg(theme::white(0.16))
-                .child(
-                    div()
-                        .h_full()
-                        .w(relative(value))
-                        .rounded_full()
-                        .bg(theme::text())
-                        .group_hover("slider", |s| s.bg(theme::accent())),
-                ),
-        )
-        .child(
-            div()
+type OnChange = Rc<dyn Fn(SliderChange, &mut Window, &mut App)>;
+
+#[derive(IntoElement)]
+pub struct Slider {
+    id: ElementId,
+    value: f32,
+    on_change: OnChange,
+}
+
+impl RenderOnce for Slider {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Held across frames so the gesture survives re-renders; the pointer
+        // is tracked window-wide, so leaving the slider mid-drag is fine.
+        let held = window.use_keyed_state(self.id.clone(), cx, |_, _| false);
+        let dragging = *held.read(cx);
+        let value = self.value;
+        let on_change = self.on_change;
+        let bounds = Rc::new(Cell::new(Bounds::default()));
+
+        div()
+            .id(self.id)
+            .group("slider")
+            .relative()
+            .w_full()
+            .h(px(16.0))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .child(
+                canvas(
+                    {
+                        let bounds = bounds.clone();
+                        move |b, _, _| bounds.set(b)
+                    },
+                    {
+                        let held = held.clone();
+                        let on_change = on_change.clone();
+                        move |b, _, window, _| {
+                            if !dragging {
+                                return;
+                            }
+                            let on_move = on_change.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseMoveEvent, phase, window, cx| {
+                                    if phase == DispatchPhase::Capture && event.dragging() {
+                                        on_move(
+                                            SliderChange::Preview(ratio(b, event.position)),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                },
+                            );
+                            let held = held.clone();
+                            let on_up = on_change.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseUpEvent, phase, window, cx| {
+                                    if phase == DispatchPhase::Capture
+                                        && event.button == MouseButton::Left
+                                    {
+                                        held.update(cx, |held, cx| {
+                                            *held = false;
+                                            cx.notify();
+                                        });
+                                        on_up(
+                                            SliderChange::Commit(ratio(b, event.position)),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                },
+                            );
+                        }
+                    },
+                )
                 .absolute()
-                .left(relative(value))
-                .ml(px(-6.0))
-                .size(px(12.0))
-                .rounded_full()
-                .bg(theme::text())
-                .shadow(vec![BoxShadow {
-                    color: theme::black(0.4),
-                    offset: point(px(0.0), px(1.0)),
-                    blur_radius: px(4.0),
-                    spread_radius: px(0.0),
-                    inset: false,
-                }])
-                .invisible()
-                .group_hover("slider", |s| s.visible()),
-        )
-        .on_mouse_down(MouseButton::Left, {
-            let on_change = on_change.clone();
-            let bounds = bounds.clone();
-            move |event, window, cx| {
-                on_change(ratio(bounds.get(), event.position), false, window, cx);
-            }
-        })
-        .on_drag(SliderDrag(id.clone()), |_, _, _, cx| cx.new(|_| DragGhost))
-        .on_drag_move::<SliderDrag>(move |event, window, cx| {
-            if event.drag(cx).0 == id {
-                on_change(ratio(event.bounds, event.event.position), true, window, cx);
-            }
-        })
+                .size_full(),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(4.0))
+                    .rounded_full()
+                    .bg(theme::white(0.16))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(value))
+                            .rounded_full()
+                            .bg(if dragging {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            })
+                            .group_hover("slider", |s| s.bg(theme::accent())),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(relative(value))
+                    .ml(px(-6.0))
+                    .size(px(12.0))
+                    .rounded_full()
+                    .bg(theme::text())
+                    .shadow(vec![BoxShadow {
+                        color: theme::black(0.4),
+                        offset: point(px(0.0), px(1.0)),
+                        blur_radius: px(4.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }])
+                    .when(!dragging, |thumb| {
+                        thumb.invisible().group_hover("slider", |s| s.visible())
+                    }),
+            )
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                held.update(cx, |held, cx| {
+                    *held = true;
+                    cx.notify();
+                });
+                on_change(
+                    SliderChange::Preview(ratio(bounds.get(), event.position)),
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            })
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! Spotify Connect: control playback on other devices.
 //!
-//! What plays where is pushed to us through the Connect cluster (see
-//! `player::backend`); these calls only send commands.
+//! Changes made by other devices are pushed to us through the Connect
+//! cluster (see `player::backend`). Spotify does not push our own changes
+//! back, so the device list is also read here once at start.
 
 use anyhow::Result;
 use reqwest::Method;
@@ -12,6 +13,10 @@ use super::Api;
 use crate::model::*;
 
 impl Api {
+    pub async fn remote_devices(&self) -> Result<RemoteDevices> {
+        self.get("/me/player/devices").await
+    }
+
     pub async fn remote_queue(&self) -> Result<RemoteQueue> {
         self.get("/me/player/queue").await
     }

@@ -463,6 +463,27 @@ impl SearchResults {
     }
 }
 
+/// A device as the Web API lists it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RemoteDevice {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default)]
+    pub is_restricted: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RemoteDevices {
+    #[serde(default)]
+    pub devices: Vec<RemoteDevice>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RemoteQueue {
     #[serde(default)]

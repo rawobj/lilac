@@ -19,16 +19,17 @@ use librespot_core::authentication::Credentials;
 use librespot_core::config::{DeviceType, SessionConfig};
 use librespot_core::dealer::protocol::Message;
 use librespot_core::session::Session;
+use librespot_core::spotify_uri::SpotifyUri;
 use librespot_playback::audio_backend;
 use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
-use librespot_playback::mixer::softmixer::SoftMixer;
-use librespot_playback::mixer::{Mixer, MixerConfig};
+use librespot_playback::mixer::Mixer;
 use librespot_playback::player::{Player as Engine, PlayerEventChannel};
 use librespot_protocol::connect::ClusterUpdate;
 use tokio::sync::mpsc;
 
 pub use librespot_playback::player::PlayerEvent as EngineEvent;
 
+use super::sink::{InstantSink, OutputControl, OutputMixer};
 use crate::settings::{Quality, Settings};
 use crate::spotify::api::Auth;
 use crate::spotify::oauth;
@@ -95,6 +96,8 @@ pub struct Backend {
     session: Session,
     engine: Arc<Engine>,
     spirc: Spirc,
+    mixer: Arc<OutputMixer>,
+    output: Arc<OutputControl>,
     pub device_id: String,
     pub options: Options,
 }
@@ -121,11 +124,10 @@ impl Backend {
         // No librespot cache: credentials stay in our own store and audio is never written to disk.
         let session = Session::new(config, None);
 
-        let mixer = Arc::new(
-            SoftMixer::open(MixerConfig::default())
-                .map_err(|e| anyhow!("could not open the volume mixer: {e}"))?,
-        );
-        mixer.set_volume(to_mixer(volume));
+        // Volume is applied by our sink as samples leave for the speaker,
+        // not by librespot before they are queued.
+        let output = OutputControl::new(1.0);
+        let mixer = Arc::new(OutputMixer::new(output.clone(), to_mixer(volume)));
 
         let sink = audio_backend::find(None).context("no audio backend compiled in")?;
         let player_config = PlayerConfig {
@@ -138,12 +140,16 @@ impl Backend {
             normalisation: options.normalize,
             ..PlayerConfig::default()
         };
-        let engine = Engine::new(
-            player_config,
-            session.clone(),
-            mixer.get_soft_volume(),
-            move || sink(None, AudioFormat::default()),
-        );
+        let engine = Engine::new(player_config, session.clone(), mixer.get_soft_volume(), {
+            let output = output.clone();
+            // librespot's sink would ignore our volume; it is only the
+            // fallback when our stream cannot open, which in practice
+            // means there is no audio device at all.
+            move || match InstantSink::open(output) {
+                Ok(instant) => Box::new(instant),
+                Err(_) => sink(None, AudioFormat::default()),
+            }
+        });
         let engine_events = engine.get_player_event_channel();
 
         // Subscribe before Spirc connects the session so the first cluster is not missed.
@@ -166,7 +172,7 @@ impl Backend {
             session.clone(),
             Credentials::with_access_token(token),
             engine.clone(),
-            mixer,
+            mixer.clone(),
         )
         .await
         .map_err(|e| anyhow!("could not start a streaming session: {e}"))?;
@@ -192,6 +198,8 @@ impl Backend {
                 session,
                 engine,
                 spirc,
+                mixer,
+                output,
                 device_id,
                 options,
             },
@@ -215,6 +223,7 @@ impl Backend {
         tracks: &[String],
         start: Start,
         shuffle: bool,
+        active: bool,
     ) -> Result<()> {
         let options = LoadRequestOptions {
             start_playing: true,
@@ -232,9 +241,28 @@ impl Backend {
             Some(uri) => LoadRequest::from_context_uri(uri.to_string(), options),
             None => LoadRequest::from_tracks(tracks.to_vec(), options),
         };
-        // Load only works on the active device; activating an active device is a no-op.
-        self.spirc.activate().map_err(spirc_error)?;
+        // Load only works on the active device. Spirc answers every command
+        // with a state upload, so activating an active device would only add
+        // a round trip before the track starts.
+        if !active {
+            self.spirc.activate().map_err(spirc_error)?;
+        }
+        self.output.flush();
         self.spirc.load(request).map_err(spirc_error)
+    }
+
+    /// Fetch the start of `uri` now, so playing it later starts at once.
+    /// librespot keeps one preloaded track and uses it when that track is
+    /// loaded next; anything else replaces it.
+    pub fn preload(&self, uri: &str) {
+        if let Ok(uri) = SpotifyUri::from_uri(uri) {
+            self.engine.preload(uri);
+        }
+    }
+
+    /// Become the active Connect device without playing anything yet.
+    pub fn activate(&self) -> Result<()> {
+        self.spirc.activate().map_err(spirc_error)
     }
 
     /// Pull playback over from whichever device has it.
@@ -251,14 +279,17 @@ impl Backend {
     }
 
     pub fn next(&self) {
+        self.output.flush();
         let _ = self.spirc.next();
     }
 
     pub fn previous(&self) {
+        self.output.flush();
         let _ = self.spirc.prev();
     }
 
     pub fn seek(&self, position_ms: u32) {
+        self.output.flush();
         let _ = self.spirc.set_position_ms(position_ms);
     }
 
@@ -271,8 +302,15 @@ impl Backend {
         let _ = self.spirc.repeat_track(track);
     }
 
+    /// Change what is audible at once, without telling Spotify.
+    pub fn set_local_volume(&self, volume: f32) {
+        self.mixer.set_local(to_mixer(volume));
+    }
+
+    /// Announce the volume through Spirc, so other apps see it too. Spirc
+    /// uploads its state after every command and handles them one at a
+    /// time, so this is for the end of a gesture, not every step of it.
     pub fn set_volume(&self, volume: f32) {
-        // Through Spirc, so other apps see the new volume too.
         let _ = self.spirc.set_volume(to_mixer(volume));
     }
 
@@ -292,7 +330,7 @@ fn spirc_error(err: librespot_core::Error) -> anyhow::Error {
 }
 
 /// The slider's 0..1 onto librespot's 16-bit volume. The mixer applies its
-/// own logarithmic curve, so the mapping here stays linear.
+/// own (cubic) curve, so the mapping here stays linear.
 fn to_mixer(volume: f32) -> u16 {
     (volume.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16
 }

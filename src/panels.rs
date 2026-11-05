@@ -16,6 +16,7 @@ use crate::ui_state::RightPanel;
 pub struct RightPanelView {
     scroll: ScrollHandle,
     shown: u64,
+    panel: RightPanel,
 }
 
 /// A fingerprint of the player state the panel draws.
@@ -58,12 +59,22 @@ impl RightPanelView {
         .detach();
         cx.observe(&app::library(cx), |_, _, cx| cx.notify())
             .detach();
-        cx.observe(&app::ui(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&app::ui(cx), |this: &mut Self, ui, cx| {
+            let panel = ui.read(cx).right_panel;
+            if panel == RightPanel::Devices && this.panel != panel {
+                app::player(cx)
+                    .update(cx, |p, cx| p.refresh_devices(std::time::Duration::ZERO, cx));
+            }
+            this.panel = panel;
+            cx.notify()
+        })
+        .detach();
         cx.observe(&app::friends(cx), |_, _, cx| cx.notify())
             .detach();
         Self {
             scroll: ScrollHandle::new(),
             shown: 0,
+            panel: RightPanel::Hidden,
         }
     }
 

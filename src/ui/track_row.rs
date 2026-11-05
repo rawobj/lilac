@@ -259,6 +259,23 @@ pub fn track_row(
                 on_play(window, cx);
             }
         })
+        .when(playable && !is_current, |row| {
+            // The first click of a double click starts the fetch; the second
+            // arrives a few hundred milliseconds later to a track half loaded.
+            let uri = track.uri.clone();
+            row.on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                if event.click_count == 1 {
+                    app::player(cx).update(cx, |p, _| p.prefetch_track(&uri));
+                }
+            })
+        })
+        .when(playable && !is_current, |row| {
+            let uri = track.uri.clone();
+            row.on_hover(move |hovered, _, cx| {
+                let uri = uri.clone();
+                app::player(cx).update(cx, |p, cx| p.hover_track(hovered.then_some(uri), cx));
+            })
+        })
         .on_mouse_down(MouseButton::Right, move |event, _, cx| {
             menus::track_menu(&t, menu.clone(), event.position, cx);
         })
