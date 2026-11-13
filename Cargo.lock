@@ -3949,6 +3949,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui-kit",
  "image",
+ "libc",
  "librespot-connect",
  "librespot-core",
  "librespot-metadata",

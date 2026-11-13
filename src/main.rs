@@ -19,6 +19,7 @@ mod runtime;
 mod search;
 mod session;
 mod settings;
+mod single_instance;
 mod spotify;
 mod theme;
 mod ui;
@@ -28,6 +29,10 @@ mod views;
 use gpui_kit::*;
 
 fn main() {
+    let Some(mut show_requests) = single_instance::claim() else {
+        // The running Lilac brings its window to the front.
+        return;
+    };
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(|cx| {
@@ -59,5 +64,17 @@ fn main() {
             })
             .expect("failed to open window");
             cx.activate(true);
+
+            cx.spawn(async move |cx| {
+                while show_requests.recv().await.is_some() {
+                    cx.update(|cx| {
+                        cx.activate(true);
+                        for window in cx.windows() {
+                            let _ = window.update(cx, |_, window, _| window.activate_window());
+                        }
+                    });
+                }
+            })
+            .detach();
         });
 }

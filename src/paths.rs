@@ -43,6 +43,24 @@ pub fn cache_dir() -> PathBuf {
     base.join(APP_DIR)
 }
 
+/// Data Lilac keeps but did not get from the user: `$XDG_DATA_HOME/lilac`
+/// or the platform's equivalent.
+#[cfg(windows)]
+pub fn data_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                home().join("Library/Application Support")
+            } else {
+                home().join(".local/share")
+            }
+        });
+    base.join(APP_DIR)
+}
+
 pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.json")
 }
