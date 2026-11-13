@@ -18,11 +18,15 @@ pub struct Images {
 }
 
 impl Images {
-    /// Best URL for a square rendered at `px` logical pixels.
+    /// Best URL for a square rendered at `px` logical pixels on the
+    /// current display. Spotify's sizes are 64, 300 and 640 pixels; each is
+    /// used only up to a little below its size, since the small ones are
+    /// heavily compressed and look soft when stretched.
     pub fn for_size(&self, px: u32) -> Option<SharedString> {
-        let pick = if px <= 80 {
+        let device = px as f32 * display_scale();
+        let pick = if device <= 48.0 {
             [&self.small, &self.medium, &self.large]
-        } else if px <= 320 {
+        } else if device <= 240.0 {
             [&self.medium, &self.large, &self.small]
         } else {
             [&self.large, &self.medium, &self.small]
@@ -33,6 +37,20 @@ impl Images {
     pub fn is_empty(&self) -> bool {
         self.small.is_none() && self.medium.is_none() && self.large.is_none()
     }
+}
+
+/// The window's scale factor, as hundredths, for picking image sizes.
+static DISPLAY_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+pub fn set_display_scale(scale: f32) {
+    DISPLAY_SCALE.store(
+        (scale * 100.0).round() as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn display_scale() -> f32 {
+    DISPLAY_SCALE.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.0
 }
 
 #[derive(Deserialize)]
@@ -571,8 +589,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(images.for_size(40).unwrap().as_ref(), "s");
+        assert_eq!(images.for_size(56).unwrap().as_ref(), "m");
         assert_eq!(images.for_size(200).unwrap().as_ref(), "m");
-        assert_eq!(images.for_size(600).unwrap().as_ref(), "l");
+        assert_eq!(images.for_size(320).unwrap().as_ref(), "l");
         let none: Images = serde_json::from_str("null").unwrap();
         assert!(none.is_empty());
     }

@@ -261,6 +261,7 @@ impl Lilac {
 
 impl Render for Lilac {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::model::set_display_scale(window.scale_factor());
         let status = app::session(cx).read(cx).status.clone();
         let route = app::nav(cx).read(cx).current().clone();
         let (immersive, sidebar_collapsed, panel) = {
