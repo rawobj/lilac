@@ -100,6 +100,8 @@ pub struct Lilac {
     pages: HashMap<Route, AnyView>,
     dialog_name: Entity<InputState>,
     dialog_description: Entity<InputState>,
+    menu_scroll: ScrollHandle,
+    dialog_scroll: ScrollHandle,
     shown_dialog: Option<Dialog>,
 }
 
@@ -147,6 +149,8 @@ impl Lilac {
             dialog_name: cx.new(|cx| InputState::new(window, cx).placeholder("Playlist name")),
             dialog_description: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Add an optional description")),
+            menu_scroll: ScrollHandle::new(),
+            dialog_scroll: ScrollHandle::new(),
             shown_dialog: None,
         }
     }
@@ -158,6 +162,8 @@ impl Lilac {
             return;
         }
         self.shown_dialog = dialog.clone();
+        // A new dialog starts at its top.
+        self.dialog_scroll.set_offset(point(px(0.0), px(0.0)));
         let (name, description) = match &dialog {
             Some(Dialog::CreatePlaylist { .. }) => {
                 let count = app::library(cx).read(cx).playlists.len() + 1;
@@ -356,10 +362,11 @@ impl Render for Lilac {
             .text_sm()
             .child(self.backdrop(cx))
             .child(div().relative().size_full().child(content))
-            .children(overlays::menu(cx))
+            .children(overlays::menu(&self.menu_scroll, cx))
             .children(overlays::dialog(
                 &self.dialog_name,
                 &self.dialog_description,
+                &self.dialog_scroll,
                 cx,
             ))
             .children(overlays::toasts(cx))

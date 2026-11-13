@@ -10,7 +10,7 @@ use crate::theme;
 use crate::ui::{self, icons};
 use crate::ui_state::{Dialog, ToastKind};
 
-pub fn menu(cx: &mut App) -> Option<impl IntoElement + use<>> {
+pub fn menu(scroll: &ScrollHandle, cx: &mut App) -> Option<impl IntoElement + use<>> {
     let ui = app::ui(cx);
     let menu = ui.read(cx).menu.as_ref()?;
     let position = menu.position;
@@ -18,13 +18,14 @@ pub fn menu(cx: &mut App) -> Option<impl IntoElement + use<>> {
 
     let mut list = theme::popup()
         .id(("menu", generation))
-        .occlude()
         .min_w(px(220.0))
         .max_w(px(320.0))
         .max_h(px(420.0))
         .overflow_y_scroll()
         .restrict_scroll_to_axis()
+        .track_scroll(scroll)
         .p_1()
+        .pr(px(12.0))
         .flex()
         .flex_col();
 
@@ -78,7 +79,17 @@ pub fn menu(cx: &mut App) -> Option<impl IntoElement + use<>> {
             anchored()
                 .position(position)
                 .snap_to_window_with_margin(px(8.0))
-                .child(list),
+                .child(
+                    // Blocks the pointer for what is behind, here rather
+                    // than on the list, so hovering it shows the scrollbar.
+                    div()
+                        .id("menu-frame")
+                        .occlude()
+                        .relative()
+                        .child(list)
+                        .group("scrollable")
+                        .child(ui::vertical_scrollbar(scroll)),
+                ),
         )
         .with_priority(2),
     )
@@ -153,6 +164,7 @@ fn field(label: &'static str, state: &Entity<InputState>) -> Div {
 pub fn dialog(
     name: &Entity<InputState>,
     description: &Entity<InputState>,
+    scroll: &ScrollHandle,
     cx: &mut App,
 ) -> Option<impl IntoElement + use<>> {
     let dialog = app::ui(cx).read(cx).dialog.clone()?;
@@ -285,7 +297,6 @@ pub fn dialog(
     let has_confirm = confirm.is_some();
     let panel = theme::popup()
         .id("dialog")
-        .occlude()
         .w(px(440.0))
         .max_h(px(560.0))
         .overflow_y_scroll()
@@ -333,7 +344,16 @@ pub fn dialog(
                 .items_center()
                 .justify_center()
                 .on_click(close)
-                .child(panel.on_click(|_, _, cx| cx.stop_propagation())),
+                .child(
+                    div()
+                        .id("dialog-frame")
+                        .occlude()
+                        .relative()
+                        .child(panel.track_scroll(scroll))
+                        .group("scrollable")
+                        .child(ui::vertical_scrollbar(scroll))
+                        .on_click(|_, _, cx| cx.stop_propagation()),
+                ),
         )
         .with_priority(1),
     )

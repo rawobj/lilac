@@ -150,19 +150,23 @@ impl RenderOnce for Shelf {
                             .restrict_scroll_to_axis()
                             .track_scroll(&scroll)
                             .on_scroll_wheel(shift_scrolls_sideways(scroll.clone()))
-                            .children(self.cards),
+                            // Room for the scrollbar under the cards and
+                            // their hover background (padding on the
+                            // scrolling row itself is not laid out).
+                            .child(div().flex().pb(px(14.0)).children(self.cards)),
                     )
                     // A thin bar while the pointer is over the shelf: shows there is
                     // more to the side and can be dragged with a mouse.
                     .child(
                         div()
                             .absolute()
+                            .opacity(0.55)
+                            .invisible()
+                            .group_hover("shelf", |s| s.visible())
                             .left(px(theme::GAP * 3.0))
                             .right(px(theme::GAP * 3.0))
                             .bottom_0()
                             .h(px(10.0))
-                            .invisible()
-                            .group_hover("shelf", |s| s.visible())
                             .child(
                                 Scrollbar::horizontal(&scroll)
                                     .id("bar")

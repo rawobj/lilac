@@ -11,7 +11,6 @@ mod settings;
 mod show;
 mod whats_new;
 
-use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
 
 use crate::actions;
@@ -58,17 +57,12 @@ pub fn scroll_page(id: &'static str, handle: &ScrollHandle, content: impl IntoEl
                 .overflow_y_scroll()
                 .restrict_scroll_to_axis()
                 .track_scroll(handle)
+                // Room for the scrollbar, so it never covers content.
+                .pr(px(12.0))
                 .child(content),
         )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .right_0()
-                .bottom_0()
-                .w(px(12.0))
-                .child(Scrollbar::vertical(handle)),
-        )
+        .group("scrollable")
+        .child(crate::ui::vertical_scrollbar(handle))
 }
 
 // Cards for each kind of catalog item, shared by home, search, artist and profile.

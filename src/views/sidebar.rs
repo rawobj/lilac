@@ -431,7 +431,7 @@ impl Render for Sidebar {
                 .id("filters")
                 .flex_none()
                 .px_3()
-                .pb_2()
+                .pb_3()
                 .flex()
                 .gap_2()
                 .overflow_x_scroll()
@@ -444,7 +444,12 @@ impl Render for Sidebar {
                         .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx))),
                 );
             }
-            row
+            div()
+                .relative()
+                .flex_none()
+                .child(row)
+                .group("scrollable")
+                .child(ui::horizontal_scrollbar(&self.chips_scroll))
         });
 
         let tools = (!collapsed).then(|| {
@@ -531,6 +536,8 @@ impl Render for Sidebar {
                         .map(|ix| {
                             div()
                                 .w_full()
+                                // Room for the scrollbar.
+                                .pr(px(10.0))
                                 .child(this.render_entry(ix, collapsed, window, cx))
                         })
                         .collect::<Vec<_>>()
@@ -539,6 +546,17 @@ impl Render for Sidebar {
             .track_scroll(&self.scroll)
             .size_full()
             .into_any_element()
+        };
+        let list = if count == 0 {
+            list
+        } else {
+            div()
+                .relative()
+                .size_full()
+                .child(list)
+                .group("scrollable")
+                .child(ui::vertical_scrollbar(&self.scroll))
+                .into_any_element()
         };
 
         div()

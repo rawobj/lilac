@@ -308,3 +308,43 @@ pub fn loading_state() -> Div {
         .py_16()
         .child(spinner(28.0))
 }
+
+/// A vertical scrollbar over the right edge of a scrolling area, always
+/// visible so it is clear there is more. Put it in a `relative` parent next
+/// to the scrolling element.
+pub fn vertical_scrollbar<H>(handle: &H) -> Div
+where
+    H: gpui_kit::component::scroll::ScrollbarHandle + Clone,
+{
+    use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+    div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .w(px(12.0))
+        // Faint, and only while the pointer is over the scrolling section
+        // (whose parent carries the "scrollable" group).
+        .opacity(0.55)
+        .invisible()
+        .group_hover("scrollable", |s| s.visible())
+        .child(Scrollbar::vertical(handle).mode(ScrollbarMode::Always))
+}
+
+/// The horizontal counterpart of [`vertical_scrollbar`], along the bottom.
+pub fn horizontal_scrollbar<H>(handle: &H) -> Div
+where
+    H: gpui_kit::component::scroll::ScrollbarHandle + Clone,
+{
+    use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .h(px(10.0))
+        .opacity(0.55)
+        .invisible()
+        .group_hover("scrollable", |s| s.visible())
+        .child(Scrollbar::horizontal(handle).mode(ScrollbarMode::Always))
+}

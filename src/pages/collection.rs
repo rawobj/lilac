@@ -4,7 +4,6 @@
 //! view. The list is virtualized: a ten-thousand-track playlist costs the same
 //! to draw as a ten-track one.
 
-use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -613,14 +612,7 @@ impl Render for CollectionPage {
                 )
                 .size_full(),
             )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .bottom_0()
-                    .w(px(12.0))
-                    .child(Scrollbar::vertical(&self.list)),
-            )
+            .group("scrollable")
+            .child(ui::vertical_scrollbar(&self.list))
     }
 }

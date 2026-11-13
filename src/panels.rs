@@ -15,6 +15,7 @@ use crate::ui_state::RightPanel;
 
 pub struct RightPanelView {
     scroll: ScrollHandle,
+    friends_scroll: ScrollHandle,
     shown: u64,
     panel: RightPanel,
 }
@@ -73,6 +74,7 @@ impl RightPanelView {
             .detach();
         Self {
             scroll: ScrollHandle::new(),
+            friends_scroll: ScrollHandle::new(),
             shown: 0,
             panel: RightPanel::Hidden,
         }
@@ -294,13 +296,22 @@ impl RightPanelView {
             }))
             .child(
                 div()
-                    .id("now-playing")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.scroll)
-                    .child(body),
+                    .child(
+                        div()
+                            .id("now-playing")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .restrict_scroll_to_axis()
+                            .track_scroll(&self.scroll)
+                            // Room for the scrollbar.
+                            .pr(px(8.0))
+                            .child(body),
+                    )
+                    .group("scrollable")
+                    .child(ui::vertical_scrollbar(&self.scroll)),
             )
     }
 
@@ -417,13 +428,22 @@ impl RightPanelView {
             .child(Self::header("Queue"))
             .child(
                 div()
-                    .id("queue")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.scroll)
-                    .child(body),
+                    .child(
+                        div()
+                            .id("queue")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .restrict_scroll_to_axis()
+                            .track_scroll(&self.scroll)
+                            // Room for the scrollbar.
+                            .pr(px(8.0))
+                            .child(body),
+                    )
+                    .group("scrollable")
+                    .child(ui::vertical_scrollbar(&self.scroll)),
             )
     }
 
@@ -593,12 +613,21 @@ impl RightPanelView {
                 }
                 panel.child(
                     div()
-                        .id("friends-scroll")
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .restrict_scroll_to_axis()
-                        .child(rows),
+                        .child(
+                            div()
+                                .id("friends-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .restrict_scroll_to_axis()
+                                .track_scroll(&self.friends_scroll)
+                                .pr(px(8.0))
+                                .child(rows),
+                        )
+                        .group("scrollable")
+                        .child(ui::vertical_scrollbar(&self.friends_scroll)),
                 )
             }
         }
