@@ -522,6 +522,9 @@ pub struct Lyrics {
     pub lines: Arc<[LyricLine]>,
     pub synced: bool,
     pub provider: SharedString,
+    /// The lines in Latin letters, one per line, when the words are in
+    /// another script and a reading is known.
+    pub romanized: Option<Arc<[SharedString]>>,
 }
 
 /// Anything that can be played as a context or opened as a page.

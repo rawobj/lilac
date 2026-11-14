@@ -56,6 +56,8 @@ pub struct Settings {
     pub compact_library: bool,
     pub reduce_transparency: bool,
     pub lyrics_style: LyricsStyle,
+    /// Show lyrics in other scripts in Latin letters, where a reading exists.
+    pub lyrics_romanized: bool,
     pub media_keys: bool,
     /// Look up lyrics on LRCLIB and NetEase when Spotify has none. Sends title and artist there.
     pub lrclib_lyrics: bool,
@@ -76,6 +78,7 @@ impl Default for Settings {
             compact_library: false,
             reduce_transparency: false,
             lyrics_style: LyricsStyle::Vivid,
+            lyrics_romanized: false,
             media_keys: true,
             lrclib_lyrics: false,
             whats_new_seen: String::new(),

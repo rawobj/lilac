@@ -16,6 +16,7 @@ mod pages;
 mod panels;
 mod paths;
 mod player;
+mod romanize;
 mod runtime;
 mod search;
 mod session;

@@ -221,6 +221,11 @@ impl LyricsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let synced = lyrics.synced;
+        let romanized = app::settings(cx)
+            .read(cx)
+            .lyrics_romanized
+            .then(|| lyrics.romanized.clone())
+            .flatten();
         let mut column = div()
             .id("lyrics")
             .size_full()
@@ -252,10 +257,14 @@ impl LyricsPage {
                 None => 0.45,
             };
             let start = line.start_ms;
-            let text: SharedString = if line.text.trim().is_empty() {
+            let words = romanized
+                .as_ref()
+                .and_then(|r| r.get(ix).cloned())
+                .unwrap_or_else(|| line.text.clone());
+            let text: SharedString = if words.trim().is_empty() {
                 "• • •".into()
             } else {
-                line.text.clone()
+                words
             };
             let line = div()
                 .id(("line", ix))
@@ -576,6 +585,8 @@ impl Render for LyricsPage {
             }
         };
         let synced = matches!(&self.state, State::Ready(l) if l.synced);
+        let can_romanize = matches!(&self.state, State::Ready(l) if l.romanized.is_some());
+        let romanized_on = app::settings(cx).read(cx).lyrics_romanized;
         let wide = vivid && f32::from(window.viewport_size().width) >= 1280.0;
 
         div()
@@ -616,6 +627,46 @@ impl Render for LyricsPage {
                             linear_color_stop(theme::black(0.2), 0.0),
                             linear_color_stop(theme::black(0.0), 1.0),
                         )),
+                )
+            })
+            .when(can_romanize, |d| {
+                d.child(
+                    div().absolute().top_4().right_6().child(
+                        div()
+                            .id("lyrics-romanized")
+                            // The lines underneath must not take the click
+                            // (a line click seeks).
+                            .occlude()
+                            .h(px(32.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_full()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .map(|d| {
+                                if romanized_on {
+                                    d.bg(theme::white(0.92))
+                                        .text_color(theme::backdrop_opaque())
+                                } else {
+                                    d.bg(theme::white(0.1))
+                                        .border_1()
+                                        .border_color(theme::white(0.2))
+                                        .text_color(theme::white(0.9))
+                                        .hover(|s| s.bg(theme::white(0.16)))
+                                }
+                            })
+                            .child("Aa")
+                            .child("Romanized")
+                            .on_click(|_, _, cx| {
+                                cx.stop_propagation();
+                                app::update_settings(cx, |s| {
+                                    s.lyrics_romanized = !s.lyrics_romanized
+                                })
+                            }),
+                    ),
                 )
             })
             .when(synced && !self.following, |d| {

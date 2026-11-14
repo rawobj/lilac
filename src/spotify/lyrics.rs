@@ -11,10 +11,13 @@ use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::api::Auth;
 use super::{enc, http};
 use crate::model::{LyricLine, Lyrics, Track};
+use gpui_kit::SharedString;
+use std::sync::Arc;
 
 const SPCLIENT: &str = "https://spclient.wg.spotify.com";
 
@@ -56,9 +59,11 @@ pub async fn fetch(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyri
     );
     let lookup_key = disk_key.clone();
     if let Ok(Some(kept)) = tokio::task::spawn_blocking(move || from_disk(&lookup_key)).await {
+        let kept = kept.map(with_reading);
         remember(&key, kept.clone());
         return kept.ok_or_else(|| anyhow!("no lyrics"));
     }
+    // Kept without the local reading, which can improve between versions.
     let found = lookup(auth, track, third_party).await;
     let keep = match &found {
         Ok(lyrics) => Some(Some(lyrics.clone())),
@@ -70,6 +75,7 @@ pub async fn fetch(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyri
     if let Some(keep) = keep {
         tokio::task::spawn_blocking(move || to_disk(&disk_key, keep.as_ref()));
     }
+    let found = found.map(with_reading);
     match &found {
         Ok(lyrics) => remember(&key, Some(lyrics.clone())),
         Err(err) if err.to_string() == "no lyrics" => remember(&key, None),
@@ -99,6 +105,12 @@ fn from_disk(key: &str) -> Option<Option<Lyrics>> {
             })
         })
         .collect();
+    let romanized = value["romanized"].as_array().map(|lines| {
+        lines
+            .iter()
+            .map(|l| SharedString::from(l.as_str().unwrap_or_default().to_string()))
+            .collect()
+    });
     Some(Some(Lyrics {
         lines: lines.into(),
         synced: value["synced"].as_bool().unwrap_or(false),
@@ -107,6 +119,7 @@ fn from_disk(key: &str) -> Option<Option<Lyrics>> {
             .unwrap_or_default()
             .to_string()
             .into(),
+        romanized,
     }))
 }
 
@@ -117,9 +130,41 @@ fn to_disk(key: &str, lyrics: Option<&Lyrics>) {
             "lines": lyrics.lines.iter().map(|l| serde_json::json!([l.start_ms, l.text.as_ref()])).collect::<Vec<_>>(),
             "synced": lyrics.synced,
             "provider": lyrics.provider.as_ref(),
+            "romanized": lyrics.romanized.as_ref().map(|r| r.iter().map(|l| l.as_ref()).collect::<Vec<_>>()),
         }),
     };
     crate::disk_cache::LYRICS.put(key, &value);
+}
+
+/// Add a Latin reading where the source gave none and the script allows.
+fn with_reading(mut lyrics: Lyrics) -> Lyrics {
+    if lyrics.romanized.is_none() {
+        lyrics.romanized =
+            crate::romanize::romanize_all(lyrics.lines.iter().map(|l| l.text.as_ref()))
+                .map(|lines| lines.into_iter().map(SharedString::from).collect());
+    }
+    lyrics
+}
+
+/// Line `ix`'s counterpart in `other`, matched by start time.
+fn aligned(lines: &[LyricLine], other: &[LyricLine]) -> Option<Arc<[SharedString]>> {
+    let mut matched = 0;
+    let out: Vec<SharedString> = lines
+        .iter()
+        .map(|line| {
+            match other
+                .iter()
+                .find(|o| o.start_ms.abs_diff(line.start_ms) <= 60)
+            {
+                Some(o) if !o.text.trim().is_empty() => {
+                    matched += 1;
+                    o.text.clone()
+                }
+                _ => line.text.clone(),
+            }
+        })
+        .collect();
+    (matched * 2 >= lines.len().max(1)).then(|| out.into())
 }
 
 async fn lookup(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyrics> {
@@ -167,6 +212,9 @@ struct SpotifyLyrics {
     lines: Vec<SpotifyLine>,
     #[serde(default)]
     provider_display_name: String,
+    /// Other versions of the lines (translations, romanizations).
+    #[serde(default)]
+    alternatives: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +242,7 @@ async fn from_spotify(auth: &Auth, track: &Track) -> Result<Lyrics> {
         .error_for_status()?;
     let parsed: ColorLyrics = response.json().await?;
     let synced = parsed.lyrics.sync_type == "LINE_SYNCED";
+    let romanized = romanization(&parsed.lyrics.alternatives, parsed.lyrics.lines.len());
     let lines: Vec<LyricLine> = parsed
         .lyrics
         .lines
@@ -212,6 +261,34 @@ async fn from_spotify(auth: &Auth, track: &Track) -> Result<Lyrics> {
         lines: lines.into(),
         synced,
         provider: provider.into(),
+        romanized,
+    })
+}
+
+/// Spotify lists romanizations among its alternatives (`ja-Latn`, or
+/// lines in Latin letters); take the first that fits line for line.
+fn romanization(alternatives: &[Value], count: usize) -> Option<Arc<[SharedString]>> {
+    alternatives.iter().find_map(|alt| {
+        let language = alt
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let lines: Vec<SharedString> = alt
+            .get("lines")?
+            .as_array()?
+            .iter()
+            .map(|l| {
+                l.as_str()
+                    .or_else(|| l.get("words").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string()
+                    .into()
+            })
+            .collect();
+        let latin = lines
+            .iter()
+            .all(|l| l.chars().all(|c| c.is_ascii() || !c.is_alphabetic()));
+        (lines.len() == count && (language.ends_with("Latn") || latin)).then(|| lines.into())
     })
 }
 
@@ -298,6 +375,7 @@ fn from_lrclib_record(found: LrcLib) -> Result<Lyrics> {
             .into(),
             synced: false,
             provider: "LRCLIB".into(),
+            romanized: None,
         });
     }
     if let Some(synced) = found.synced_lyrics.filter(|s| !s.trim().is_empty()) {
@@ -307,7 +385,8 @@ fn from_lrclib_record(found: LrcLib) -> Result<Lyrics> {
                 lines: lines.into(),
                 synced: true,
                 provider: "LRCLIB".into(),
-                });
+                romanized: None,
+            });
         }
     }
     let plain = found
@@ -329,6 +408,7 @@ fn plain_lyrics(text: &str, provider: &str) -> Lyrics {
         lines: lines.into(),
         synced: false,
         provider: provider.to_string().into(),
+        romanized: None,
     }
 }
 
@@ -374,6 +454,9 @@ struct NeArtist {
 struct NeLyric {
     #[serde(default)]
     lrc: Option<NeLrc>,
+    /// Romaji for Japanese songs (and Korean), timed like `lrc`.
+    #[serde(default)]
+    romalrc: Option<NeLrc>,
 }
 
 #[derive(Deserialize)]
@@ -427,6 +510,10 @@ async fn from_netease(track: &Track) -> Result<Lyrics> {
         .json()
         .await?;
     let text = lyric.lrc.map(|l| l.lyric).unwrap_or_default();
+    let roman = lyric
+        .romalrc
+        .map(|l| parse_lrc(&l.lyric))
+        .unwrap_or_default();
     // NetEase puts credits ("作词 : …") on the first timed lines.
     let lines: Vec<LyricLine> = parse_lrc(&text)
         .into_iter()
@@ -435,10 +522,14 @@ async fn from_netease(track: &Track) -> Result<Lyrics> {
     if lines.iter().filter(|l| !l.text.is_empty()).count() < 2 {
         return Err(anyhow!("no lyrics"));
     }
+    let romanized = (!roman.is_empty())
+        .then(|| aligned(&lines, &roman))
+        .flatten();
     Ok(Lyrics {
         lines: lines.into(),
         synced: true,
         provider: "NetEase Cloud Music".into(),
+        romanized,
     })
 }
 
