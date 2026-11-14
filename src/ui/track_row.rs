@@ -124,11 +124,13 @@ pub fn track_row(
                 .gap(px(6.0))
                 .when(track.explicit, |d| d.child(explicit_badge()))
                 .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(track.artist_line()),
+                    super::artist_line_links(
+                        format!("row-{}", track.uri),
+                        track,
+                        theme::text_muted(),
+                        theme::text(),
+                    )
+                    .text_xs(),
                 ),
         );
 

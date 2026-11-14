@@ -160,12 +160,12 @@ impl RightPanelView {
                                     .font_weight(FontWeight::BOLD)
                                     .child(track.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_color(theme::text_muted())
-                                    .child(track.artist_line()),
-                            ),
+                            .child(ui::artist_line_links(
+                                "now-playing",
+                                &track,
+                                theme::text_muted(),
+                                theme::text(),
+                            )),
                     )
                     .when(!track.is_episode() && !track.is_local, |d| {
                         d.child(
@@ -798,11 +798,13 @@ fn compact_row(id: &'static str, track: &Track, window: &Window, cx: &mut App) -
                         .child(track.name.clone()),
                 )
                 .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(track.artist_line()),
+                    ui::artist_line_links(
+                        format!("queue-{}", track.uri),
+                        track,
+                        theme::text_muted(),
+                        theme::text(),
+                    )
+                    .text_xs(),
                 ),
         )
 }

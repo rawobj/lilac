@@ -86,11 +86,6 @@ impl PlayerBar {
             .as_ref()
             .map(|s| s.id.clone())
             .filter(|id| !id.is_empty());
-        let artist_id = track
-            .artists
-            .first()
-            .map(|a| a.id.clone())
-            .filter(|id| !id.is_empty());
 
         div()
             .flex_1()
@@ -138,19 +133,8 @@ impl PlayerBar {
                             }),
                     )
                     .child(
-                        div()
-                            .id("artist")
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::text()))
-                            .child(track.artist_line())
-                            .on_click(move |_, _, cx| {
-                                if let Some(id) = artist_id.clone() {
-                                    app::navigate(Route::Artist(id), cx);
-                                }
-                            }),
+                        ui::artist_line_links("bar", &track, theme::text_muted(), theme::text())
+                            .text_xs(),
                     )
                     .children(listening_on.map(|name| {
                         div()

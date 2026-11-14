@@ -309,6 +309,69 @@ pub fn loading_state() -> Div {
         .child(spinner(28.0))
 }
 
+/// Artist names, each a link to the artist's page, separated by commas.
+/// `key` keeps the links' ids apart from other links on the page. A click
+/// on a name opens the artist and goes no further (rows that play on click
+/// stay put).
+pub fn artist_links(
+    key: impl Into<SharedString>,
+    artists: &[crate::model::ArtistRef],
+    color: Hsla,
+    hover: Hsla,
+) -> Div {
+    let key = key.into();
+    let mut row = div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .flex()
+        .items_center()
+        .text_color(color);
+    let count = artists.len();
+    for (ix, artist) in artists.iter().enumerate() {
+        if ix > 0 {
+            row = row.child(div().flex_none().child(",\u{a0}"));
+        }
+        let name = artist.name.clone();
+        let link = div()
+            .id(SharedString::from(format!("{key}-artist-{ix}")))
+            .when(ix + 1 < count, |d| d.flex_none())
+            .when(ix + 1 == count, |d| d.min_w_0().truncate())
+            .child(name);
+        row = row.child(if artist.id.is_empty() {
+            link
+        } else {
+            let id = artist.id.clone();
+            link.cursor_pointer()
+                .hover(move |s| s.text_color(hover).underline())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    crate::app::navigate(crate::nav::Route::Artist(id.clone()), cx);
+                })
+        });
+    }
+    row
+}
+
+/// `artist_links`, or the plain artist line where there are no artists to
+/// link (episodes show their show's name).
+pub fn artist_line_links(
+    key: impl Into<SharedString>,
+    track: &crate::model::Track,
+    color: Hsla,
+    hover: Hsla,
+) -> Div {
+    if track.artists.iter().any(|a| !a.id.is_empty()) {
+        artist_links(key, &track.artists, color, hover)
+    } else {
+        div()
+            .min_w_0()
+            .truncate()
+            .text_color(color)
+            .child(track.artist_line())
+    }
+}
+
 /// A vertical scrollbar over the right edge of a scrolling area, always
 /// visible so it is clear there is more. Put it in a `relative` parent next
 /// to the scrolling element.

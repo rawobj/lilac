@@ -95,11 +95,13 @@ pub fn render(window: &Window, cx: &mut App) -> Div {
                                 .child(track.name.clone()),
                         )
                         .child(
-                            div()
-                                .truncate()
-                                .text_lg()
-                                .text_color(theme::text_muted())
-                                .child(track.artist_line()),
+                            ui::artist_line_links(
+                                "immersive",
+                                &track,
+                                theme::text_muted(),
+                                theme::text(),
+                            )
+                            .text_lg(),
                         ),
                 )
                 .child(
