@@ -6,7 +6,7 @@ use gpui_kit::*;
 use super::scroll_page;
 use crate::app;
 use crate::images::ImageCache;
-use crate::settings::{Quality, Settings};
+use crate::settings::{LyricsStyle, Quality, Settings};
 use crate::theme;
 use crate::ui::{self, Placeholder};
 use crate::ui_state::Dialog;
@@ -153,6 +153,21 @@ impl Render for SettingsPage {
                 switch("gapless", settings.gapless, |s, v| s.gapless = v),
             ));
 
+        let mut lyrics_styles = div().flex().gap_2();
+        for option in LyricsStyle::ALL {
+            lyrics_styles = lyrics_styles.child(
+                ui::chip(
+                    option.label(),
+                    option.label(),
+                    settings.lyrics_style == option,
+                )
+                .on_click(move |_, _, cx| app::update_settings(cx, |s| s.lyrics_style = option)),
+            );
+        }
+        let lyrics_detail = match settings.lyrics_style {
+            LyricsStyle::Simple => "A calm tinted page with the lines, nothing moving.",
+            LyricsStyle::Vivid => "The album art blurred behind glass, the sung line glowing.",
+        };
         let display = section("Display")
             .child(row(
                 "Reduce transparency",
@@ -161,6 +176,7 @@ impl Render for SettingsPage {
                     s.reduce_transparency = v
                 }),
             ))
+            .child(row("Lyrics", lyrics_detail, lyrics_styles))
             .child(row(
                 "Show Now Playing panel on start",
                 "",

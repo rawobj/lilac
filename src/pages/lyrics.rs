@@ -15,6 +15,7 @@ use crate::images::ImageCache;
 use crate::model::{Lyrics, Track};
 use crate::player::PlayerEvent;
 use crate::runtime;
+use crate::settings::LyricsStyle;
 use crate::spotify::lyrics::{self, active_line};
 use crate::theme;
 use crate::ui::{self, Placeholder, icons};
@@ -55,6 +56,8 @@ impl LyricsPage {
             |this: &mut Self, _, _: &PlayerEvent, cx| this.sync(cx),
         )
         .detach();
+        cx.observe(&app::settings(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let mut this = Self {
             track: None,
@@ -210,11 +213,11 @@ impl LyricsPage {
         cx.notify();
     }
 
-    /// `glow` is the active line's halo color.
+    /// `glow` is the active line's halo color; `None` draws none.
     fn lyrics_view(
         &self,
         lyrics: &Lyrics,
-        glow: Hsla,
+        glow: Option<Hsla>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let synced = lyrics.synced;
@@ -267,7 +270,7 @@ impl LyricsPage {
                 // The glow: a soft band of light behind the words, fading
                 // out to both sides, in a light tint of the art's color (its
                 // own shade would vanish into the backdrop).
-                .when(active, |d| {
+                .when_some(glow.filter(|_| active), |d, glow| {
                     let width = text_width(&text).clamp(80.0, 960.0);
                     let tint = Hsla {
                         l: 0.8,
@@ -303,7 +306,7 @@ impl LyricsPage {
                         })
                 })
                 .child(text);
-            column = column.child(if active {
+            column = column.child(if active && glow.is_some() {
                 // The new line brightens in rather than switching.
                 line.with_animation(
                     ("glow", ix),
@@ -524,8 +527,24 @@ impl Render for LyricsPage {
             cx.on_next_frame(window, |this, _, cx| this.glide_now(cx));
         }
         let playing = app::player(cx).read(cx).playing;
-        let art = self.track.as_ref().and_then(|t| t.cover().for_size(640));
-        let (backdrop, glow) = backdrop(art.as_ref(), playing, window, cx);
+        let vivid = app::settings(cx).read(cx).lyrics_style == LyricsStyle::Vivid;
+        let (backdrop, glow) = if vivid {
+            let art = self.track.as_ref().and_then(|t| t.cover().for_size(640));
+            backdrop(art.as_ref(), playing, window, cx)
+        } else {
+            let seed = self
+                .track
+                .as_ref()
+                .map(|t| theme::seed_of(&t.id))
+                .unwrap_or(7);
+            (
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(theme::placeholder_tint(seed).opacity(0.45)),
+                theme::accent(),
+            )
+        };
 
         let lyrics = match &self.state {
             State::Idle => notice(
@@ -550,14 +569,14 @@ impl Render for LyricsPage {
                 div()
                     .relative()
                     .size_full()
-                    .child(self.lyrics_view(&lyrics, glow, cx))
+                    .child(self.lyrics_view(&lyrics, vivid.then_some(glow), cx))
                     .group("scrollable")
                     .child(ui::vertical_scrollbar(&self.scroll))
                     .into_any_element()
             }
         };
         let synced = matches!(&self.state, State::Ready(l) if l.synced);
-        let wide = f32::from(window.viewport_size().width) >= 1280.0;
+        let wide = vivid && f32::from(window.viewport_size().width) >= 1280.0;
 
         div()
             .relative()
@@ -575,26 +594,30 @@ impl Render for LyricsPage {
                     .child(div().relative().flex_1().min_w_0().h_full().child(lyrics)),
             )
             // Lines fade in and out at the edges instead of being cut off.
-            .child(div().absolute().top_0().left_0().right_0().h(px(90.0)).bg(
-                linear_gradient(
-                    180.0,
-                    linear_color_stop(theme::black(0.3), 0.0),
-                    linear_color_stop(theme::black(0.0), 1.0),
-                ),
-            ))
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(120.0))
-                    .bg(linear_gradient(
-                        0.0,
-                        linear_color_stop(theme::black(0.2), 0.0),
+            .when(vivid, |d| {
+                d.child(div().absolute().top_0().left_0().right_0().h(px(90.0)).bg(
+                    linear_gradient(
+                        180.0,
+                        linear_color_stop(theme::black(0.3), 0.0),
                         linear_color_stop(theme::black(0.0), 1.0),
-                    )),
-            )
+                    ),
+                ))
+            })
+            .when(vivid, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(120.0))
+                        .bg(linear_gradient(
+                            0.0,
+                            linear_color_stop(theme::black(0.2), 0.0),
+                            linear_color_stop(theme::black(0.0), 1.0),
+                        )),
+                )
+            })
             .when(synced && !self.following, |d| {
                 d.child(
                     div().absolute().bottom_6().right_6().child(

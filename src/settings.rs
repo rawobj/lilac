@@ -22,6 +22,27 @@ impl Quality {
     }
 }
 
+/// How the lyrics page looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LyricsStyle {
+    /// A tinted page, still lines; light on the GPU.
+    Simple,
+    /// The artwork blurred and drifting behind glass, a glowing line.
+    Vivid,
+}
+
+impl LyricsStyle {
+    pub const ALL: [LyricsStyle; 2] = [LyricsStyle::Simple, LyricsStyle::Vivid];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LyricsStyle::Simple => "Simple",
+            LyricsStyle::Vivid => "Vivid",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -34,6 +55,7 @@ pub struct Settings {
     pub show_now_playing: bool,
     pub compact_library: bool,
     pub reduce_transparency: bool,
+    pub lyrics_style: LyricsStyle,
     pub media_keys: bool,
     /// Look up lyrics on lrclib.net when Spotify has none. Sends title and artist there.
     pub lrclib_lyrics: bool,
@@ -53,6 +75,7 @@ impl Default for Settings {
             show_now_playing: true,
             compact_library: false,
             reduce_transparency: false,
+            lyrics_style: LyricsStyle::Vivid,
             media_keys: true,
             lrclib_lyrics: false,
             whats_new_seen: String::new(),
