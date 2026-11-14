@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod assets;
+mod disk_cache;
 mod feed;
 mod friends;
 mod images;

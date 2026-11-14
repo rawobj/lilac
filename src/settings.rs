@@ -57,7 +57,7 @@ pub struct Settings {
     pub reduce_transparency: bool,
     pub lyrics_style: LyricsStyle,
     pub media_keys: bool,
-    /// Look up lyrics on lrclib.net when Spotify has none. Sends title and artist there.
+    /// Look up lyrics on LRCLIB and NetEase when Spotify has none. Sends title and artist there.
     pub lrclib_lyrics: bool,
     /// Release date of the newest What's New item the user has seen.
     pub whats_new_seen: String,

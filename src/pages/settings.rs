@@ -193,7 +193,7 @@ impl Render for SettingsPage {
             ))
             .child(row(
                 "Community lyrics",
-                "When Spotify has no lyrics, look them up on lrclib.net. Sends the song title and artist to that service.",
+                "When Spotify has no lyrics, look them up on LRCLIB and NetEase Cloud Music. Sends the song title and artist to those services.",
                 switch("lrclib", settings.lrclib_lyrics, |s, v| s.lrclib_lyrics = v),
             ));
 

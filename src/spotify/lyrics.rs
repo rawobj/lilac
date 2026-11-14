@@ -1,7 +1,13 @@
 //! Lyrics lookup.
 //!
 //! Spotify's own time-synced lyrics are tried first. When they are missing,
-//! LRCLIB, a community database, can fill in if the user enabled it.
+//! and the user enabled community lyrics, LRCLIB (an open lyrics database)
+//! is asked, by exact match and then by search, and NetEase Cloud Music
+//! after it. Synced lyrics beat plain ones from any source. Results stay in
+//! memory for the session and on disk for months.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
@@ -12,15 +18,139 @@ use crate::model::{LyricLine, Lyrics, Track};
 
 const SPCLIENT: &str = "https://spclient.wg.spotify.com";
 
-/// `third_party` allows the LRCLIB lookup, which sends the song's title and
-/// artist to lrclib.net. It is opt-in.
-pub async fn fetch(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyrics> {
-    match from_spotify(auth, track).await {
-        Ok(lyrics) if !lyrics.lines.is_empty() => Ok(lyrics),
-        Ok(_) | Err(_) if third_party => from_lrclib(track).await,
-        Ok(lyrics) => Ok(lyrics),
-        Err(err) => Err(err),
+/// Lyrics of the tracks seen lately, by track id (misses too, as `None`).
+static CACHE: Mutex<Option<(HashMap<String, Option<Lyrics>>, VecDeque<String>)>> = Mutex::new(None);
+const CACHE_TRACKS: usize = 64;
+
+fn cached(id: &str) -> Option<Option<Lyrics>> {
+    let cache = CACHE.lock().ok()?;
+    cache.as_ref()?.0.get(id).cloned()
+}
+
+fn remember(id: &str, lyrics: Option<Lyrics>) {
+    let Ok(mut cache) = CACHE.lock() else {
+        return;
+    };
+    let (map, order) = cache.get_or_insert_with(Default::default);
+    if map.insert(id.to_string(), lyrics).is_none() {
+        order.push_back(id.to_string());
+        if order.len() > CACHE_TRACKS
+            && let Some(old) = order.pop_front()
+        {
+            map.remove(&old);
+        }
     }
+}
+
+/// `third_party` allows the community lookups, which send the song's title
+/// and artist to lrclib.net and music.163.com. It is opt-in.
+pub async fn fetch(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyrics> {
+    let key = format!("{}:{third_party}", track.id);
+    if let Some(found) = cached(&key) {
+        return found.ok_or_else(|| anyhow!("no lyrics"));
+    }
+    let disk_key = format!(
+        "{}-{}",
+        track.id,
+        if third_party { "all" } else { "spotify" }
+    );
+    let lookup_key = disk_key.clone();
+    if let Ok(Some(kept)) = tokio::task::spawn_blocking(move || from_disk(&lookup_key)).await {
+        remember(&key, kept.clone());
+        return kept.ok_or_else(|| anyhow!("no lyrics"));
+    }
+    let found = lookup(auth, track, third_party).await;
+    let keep = match &found {
+        Ok(lyrics) => Some(Some(lyrics.clone())),
+        // Only a clean "nothing there" is kept; a network error is worth
+        // another try.
+        Err(err) if err.to_string() == "no lyrics" => Some(None),
+        Err(_) => None,
+    };
+    if let Some(keep) = keep {
+        tokio::task::spawn_blocking(move || to_disk(&disk_key, keep.as_ref()));
+    }
+    match &found {
+        Ok(lyrics) => remember(&key, Some(lyrics.clone())),
+        Err(err) if err.to_string() == "no lyrics" => remember(&key, None),
+        Err(_) => {}
+    }
+    found
+}
+
+/// Lyrics rarely change once published; "none found" may, so it is asked
+/// again sooner.
+const MISS_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// `Some(None)`: kept as "no lyrics".
+fn from_disk(key: &str) -> Option<Option<Lyrics>> {
+    let hit = crate::disk_cache::LYRICS.get(key)?;
+    let value = hit.value;
+    if value["none"].as_bool() == Some(true) {
+        return (hit.age < MISS_KEPT).then_some(None);
+    }
+    let lines: Vec<LyricLine> = value["lines"]
+        .as_array()?
+        .iter()
+        .filter_map(|line| {
+            Some(LyricLine {
+                start_ms: line.get(0)?.as_u64()? as u32,
+                text: line.get(1)?.as_str()?.to_string().into(),
+            })
+        })
+        .collect();
+    Some(Some(Lyrics {
+        lines: lines.into(),
+        synced: value["synced"].as_bool().unwrap_or(false),
+        provider: value["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+            .into(),
+    }))
+}
+
+fn to_disk(key: &str, lyrics: Option<&Lyrics>) {
+    let value = match lyrics {
+        None => serde_json::json!({ "none": true }),
+        Some(lyrics) => serde_json::json!({
+            "lines": lyrics.lines.iter().map(|l| serde_json::json!([l.start_ms, l.text.as_ref()])).collect::<Vec<_>>(),
+            "synced": lyrics.synced,
+            "provider": lyrics.provider.as_ref(),
+        }),
+    };
+    crate::disk_cache::LYRICS.put(key, &value);
+}
+
+async fn lookup(auth: &Auth, track: &Track, third_party: bool) -> Result<Lyrics> {
+    let spotify = from_spotify(auth, track)
+        .await
+        .ok()
+        .filter(|l| !l.lines.is_empty());
+    if spotify.as_ref().is_some_and(|l| l.synced) || !third_party {
+        return spotify.ok_or_else(|| anyhow!("no lyrics"));
+    }
+    let mut plain = spotify;
+    for source in [Source::LrclibGet, Source::LrclibSearch, Source::NetEase] {
+        let found = match source {
+            Source::LrclibGet => from_lrclib(track).await,
+            Source::LrclibSearch => from_lrclib_search(track).await,
+            Source::NetEase => from_netease(track).await,
+        };
+        match found {
+            Ok(lyrics) if lyrics.synced => return Ok(lyrics),
+            Ok(lyrics) if plain.is_none() && !lyrics.lines.is_empty() => plain = Some(lyrics),
+            _ => {}
+        }
+    }
+    plain.ok_or_else(|| anyhow!("no lyrics"))
+}
+
+#[derive(Clone, Copy)]
+enum Source {
+    LrclibGet,
+    LrclibSearch,
+    NetEase,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +243,52 @@ async fn from_lrclib(track: &Track) -> Result<Lyrics> {
         .error_for_status()?
         .json()
         .await?;
+    from_lrclib_record(found)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LrcLibHit {
+    #[serde(default)]
+    duration: f32,
+    #[serde(flatten)]
+    record: LrcLib,
+}
+
+/// LRCLIB's fuzzy search, for when the exact lookup misses (a different
+/// album name, "Remastered" in the title): the closest duration wins.
+async fn from_lrclib_search(track: &Track) -> Result<Lyrics> {
+    let artist = track.artists.first().map(|a| a.name.as_ref()).unwrap_or("");
+    let url = format!(
+        "https://lrclib.net/api/search?track_name={}&artist_name={}",
+        enc(&clean_title(&track.name)),
+        enc(artist),
+    );
+    let hits: Vec<LrcLibHit> = http()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let seconds = track.duration_ms as f32 / 1000.0;
+    let best = hits
+        .into_iter()
+        .filter(|h| (h.duration - seconds).abs() <= 3.0)
+        .min_by_key(|h| {
+            // Synced first, then the nearest duration.
+            let synced = h
+                .record
+                .synced_lyrics
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+            (!synced, ((h.duration - seconds).abs() * 10.0) as u32)
+        })
+        .ok_or_else(|| anyhow!("no lyrics"))?;
+    from_lrclib_record(best.record)
+}
+
+fn from_lrclib_record(found: LrcLib) -> Result<Lyrics> {
     if found.instrumental {
         return Ok(Lyrics {
             lines: vec![LyricLine {
@@ -131,24 +307,138 @@ async fn from_lrclib(track: &Track) -> Result<Lyrics> {
                 lines: lines.into(),
                 synced: true,
                 provider: "LRCLIB".into(),
-            });
+                });
         }
     }
     let plain = found
         .plain_lyrics
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("no lyrics"))?;
-    let lines: Vec<LyricLine> = plain
+    Ok(plain_lyrics(&plain, "LRCLIB"))
+}
+
+fn plain_lyrics(text: &str, provider: &str) -> Lyrics {
+    let lines: Vec<LyricLine> = text
         .lines()
         .map(|l| LyricLine {
             start_ms: 0,
             text: l.trim().to_string().into(),
         })
         .collect();
-    Ok(Lyrics {
+    Lyrics {
         lines: lines.into(),
         synced: false,
-        provider: "LRCLIB".into(),
+        provider: provider.to_string().into(),
+    }
+}
+
+/// "Song - 2011 Remaster" and "Song (feat. X)" are filed as "Song".
+fn clean_title(title: &str) -> String {
+    let mut title = title;
+    for cut in [" - ", " (feat", " (with", " [feat"] {
+        if let Some(ix) = title.find(cut) {
+            title = &title[..ix];
+        }
+    }
+    title.trim().to_string()
+}
+
+#[derive(Deserialize)]
+struct NeSearch {
+    #[serde(default)]
+    result: Option<NeResult>,
+}
+
+#[derive(Deserialize)]
+struct NeResult {
+    #[serde(default)]
+    songs: Vec<NeSong>,
+}
+
+#[derive(Deserialize)]
+struct NeSong {
+    id: u64,
+    #[serde(default)]
+    duration: u32,
+    #[serde(default)]
+    artists: Vec<NeArtist>,
+}
+
+#[derive(Deserialize)]
+struct NeArtist {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct NeLyric {
+    #[serde(default)]
+    lrc: Option<NeLrc>,
+}
+
+#[derive(Deserialize)]
+struct NeLrc {
+    #[serde(default)]
+    lyric: String,
+}
+
+/// NetEase Cloud Music, which has synced lyrics for much that LRCLIB lacks
+/// (Asian music especially).
+async fn from_netease(track: &Track) -> Result<Lyrics> {
+    let artist = track
+        .artists
+        .first()
+        .map(|a| a.name.to_string())
+        .unwrap_or_default();
+    let query = format!("{} {artist}", clean_title(&track.name));
+    let url = format!(
+        "https://music.163.com/api/search/get?s={}&type=1&limit=10",
+        enc(&query)
+    );
+    let search: NeSearch = http()
+        .get(url)
+        .header("Referer", "https://music.163.com/")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let songs = search.result.map(|r| r.songs).unwrap_or_default();
+    let wanted = artist.to_lowercase();
+    let song = songs
+        .into_iter()
+        .filter(|s| s.duration.abs_diff(track.duration_ms) <= 3000)
+        .find(|s| {
+            s.artists
+                .iter()
+                .any(|a| !wanted.is_empty() && a.name.to_lowercase() == wanted)
+        })
+        .ok_or_else(|| anyhow!("no lyrics"))?;
+    let url = format!(
+        "https://music.163.com/api/song/lyric?id={}&lv=1&kv=1&tv=-1&rv=-1",
+        song.id
+    );
+    let lyric: NeLyric = http()
+        .get(url)
+        .header("Referer", "https://music.163.com/")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let text = lyric.lrc.map(|l| l.lyric).unwrap_or_default();
+    // NetEase puts credits ("作词 : …") on the first timed lines.
+    let lines: Vec<LyricLine> = parse_lrc(&text)
+        .into_iter()
+        .filter(|l| !(l.text.contains(" : ") || l.text.contains("：")) || l.start_ms > 20_000)
+        .collect();
+    if lines.iter().filter(|l| !l.text.is_empty()).count() < 2 {
+        return Err(anyhow!("no lyrics"));
+    }
+    Ok(Lyrics {
+        lines: lines.into(),
+        synced: true,
+        provider: "NetEase Cloud Music".into(),
     })
 }
 
@@ -205,6 +495,13 @@ mod tests {
             }
         );
         assert_eq!(lines[2].start_ms, 62_030);
+    }
+
+    #[test]
+    fn titles_lose_versions() {
+        assert_eq!(clean_title("Song - 2011 Remaster"), "Song");
+        assert_eq!(clean_title("Song (feat. X)"), "Song");
+        assert_eq!(clean_title("Plain"), "Plain");
     }
 
     #[test]
