@@ -13,7 +13,12 @@ use std::time::Duration;
 pub fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&accept_language()) {
+            headers.insert(reqwest::header::ACCEPT_LANGUAGE, value);
+        }
         reqwest::Client::builder()
+            .default_headers(headers)
             .user_agent(concat!("lilac/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -93,5 +98,54 @@ mod tests {
         assert_eq!(dec("100%"), "100%");
         assert_eq!(dec("%zz"), "%zz");
         assert_eq!(dec("a%2"), "a%2");
+    }
+}
+
+/// The user's language for Spotify, which names artists and releases in
+/// it where it has a translation ("Yorushika" rather than "ヨルシカ" for
+/// English), as the official apps get. From the POSIX locale; English
+/// otherwise.
+pub fn accept_language() -> String {
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
+        .unwrap_or_default();
+    language_tag(&locale)
+}
+
+fn language_tag(locale: &str) -> String {
+    // "en_US.UTF-8@euro" → "en-US".
+    let base = locale.split(['.', '@']).next().unwrap_or_default();
+    let mut parts = base.split(['_', '-']);
+    let language = parts.next().unwrap_or_default().to_ascii_lowercase();
+    if language.len() < 2 || !language.chars().all(|c| c.is_ascii_alphabetic()) {
+        return "en".to_string();
+    }
+    match parts
+        .next()
+        .filter(|r| r.chars().all(|c| c.is_ascii_alphanumeric()))
+    {
+        Some(region) if !region.is_empty() => {
+            format!(
+                "{language}-{}, {language};q=0.9",
+                region.to_ascii_uppercase()
+            )
+        }
+        _ => language,
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::language_tag;
+
+    #[test]
+    fn locales_become_language_tags() {
+        assert_eq!(language_tag("en_US.UTF-8"), "en-US, en;q=0.9");
+        assert_eq!(language_tag("ja_JP"), "ja-JP, ja;q=0.9");
+        assert_eq!(language_tag("de"), "de");
+        assert_eq!(language_tag(""), "en");
+        assert_eq!(language_tag("C.UTF-8"), "en");
     }
 }
