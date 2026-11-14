@@ -30,6 +30,17 @@ const MAX_PARALLEL_FETCHES: usize = 6;
 /// Downloaded artwork kept on disk. Artwork URLs never change content, so
 /// a large budget means covers seldom download twice.
 const DISK_BUDGET_BYTES: u64 = 300 * 1024 * 1024;
+/// Edge of the blurred backdrop bitmap; drawn stretched, it stays smooth.
+const BACKDROP_EDGE: u32 = 48;
+
+/// What to make of a downloaded image.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Variant {
+    /// Downscaled to (at least) this edge in device pixels.
+    Sized(u32),
+    /// Tiny and blurred, for backgrounds.
+    Backdrop,
+}
 
 enum Entry {
     Loading,
@@ -42,12 +53,22 @@ enum Entry {
         downscaled: bool,
         /// A larger copy is being made.
         upgrading: bool,
+        /// Average color, for tinting around it, and how light the image
+        /// is (0 black to 1 white).
+        color: Hsla,
+        luma: f32,
     },
     Failed,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Key {
+    url: SharedString,
+    backdrop: bool,
+}
+
 pub struct ImageCache {
-    entries: HashMap<SharedString, Entry>,
+    entries: HashMap<Key, Entry>,
     used_bytes: usize,
     clock: u64,
     permits: Arc<Semaphore>,
@@ -60,6 +81,16 @@ struct Decoded {
     bytes: usize,
     edge: u32,
     downscaled: bool,
+    color: Hsla,
+    luma: f32,
+}
+
+/// A blurred backdrop: the bitmap, a glow color drawn from it, and its
+/// lightness (0 black to 1 white), to pick how much to darken it by.
+pub struct Backdrop {
+    pub image: Arc<RenderImage>,
+    pub glow: Hsla,
+    pub luma: f32,
 }
 
 impl ImageCache {
@@ -79,27 +110,55 @@ impl ImageCache {
     /// `edge` is the size in device pixels the image will be drawn at; the
     /// decoded bitmap is never kept much larger than that.
     pub fn get(url: &SharedString, edge: u32, cx: &mut App) -> Option<Arc<RenderImage>> {
-        let wanted = edge.clamp(32, MAX_EDGE);
+        let edge = edge.clamp(32, MAX_EDGE);
+        Self::lookup(url, Variant::Sized(edge), cx).map(|(image, _, _)| image)
+    }
+
+    /// A small blurred copy of `url` and its average color, for a backdrop
+    /// that follows the artwork.
+    pub fn backdrop(url: &SharedString, cx: &mut App) -> Option<Backdrop> {
+        Self::lookup(url, Variant::Backdrop, cx).map(|(image, glow, luma)| Backdrop {
+            image,
+            glow,
+            luma,
+        })
+    }
+
+    fn lookup(
+        url: &SharedString,
+        variant: Variant,
+        cx: &mut App,
+    ) -> Option<(Arc<RenderImage>, Hsla, f32)> {
+        let key = Key {
+            url: url.clone(),
+            backdrop: variant == Variant::Backdrop,
+        };
         let cache = cx.global_mut::<ImageCache>();
         cache.clock += 1;
         let clock = cache.clock;
-        let found = match cache.entries.get_mut(url) {
+        let found = match cache.entries.get_mut(&key) {
             Some(Entry::Ready {
                 image,
                 last_used,
                 edge,
                 downscaled,
                 upgrading,
+                color,
+                luma,
                 ..
             }) => {
                 *last_used = clock;
+                let wanted = match variant {
+                    Variant::Sized(wanted) => wanted,
+                    Variant::Backdrop => 0,
+                };
                 // Decoded smaller than it is drawn now: make a larger copy,
                 // showing this one meanwhile.
                 let upgrade = wanted > *edge && *downscaled && !*upgrading;
                 if upgrade {
                     *upgrading = true;
                 }
-                let found = Some(image.clone());
+                let found = Some((image.clone(), *color, *luma));
                 if !upgrade {
                     return found;
                 }
@@ -107,22 +166,22 @@ impl ImageCache {
             }
             Some(Entry::Loading | Entry::Failed) => return None,
             None => {
-                cache.entries.insert(url.clone(), Entry::Loading);
+                cache.entries.insert(key.clone(), Entry::Loading);
                 None
             }
         };
-        Self::fetch(url.clone(), wanted, cx);
+        Self::fetch(key, variant, cx);
         found
     }
 
-    fn fetch(key: SharedString, edge: u32, cx: &mut App) {
+    fn fetch(key: Key, variant: Variant, cx: &mut App) {
         let permits = cx.global::<ImageCache>().permits.clone();
         cx.spawn(async move |cx| {
-            let url = key.clone();
+            let url = key.url.clone();
             let result = runtime::run(async move {
                 let _permit = permits.acquire_owned().await?;
                 let bytes = download(&url).await?;
-                tokio::task::spawn_blocking(move || decode(&bytes, edge)).await?
+                tokio::task::spawn_blocking(move || decode(&bytes, variant)).await?
             })
             .await;
 
@@ -145,6 +204,8 @@ impl ImageCache {
                             edge: decoded.edge,
                             downscaled: decoded.downscaled,
                             upgrading: false,
+                            color: decoded.color,
+                            luma: decoded.luma,
                         }
                     }
                     // A failed upgrade keeps the copy it had.
@@ -155,6 +216,8 @@ impl ImageCache {
                             bytes,
                             last_used,
                             edge,
+                            color,
+                            luma,
                             ..
                         }),
                     ) => Entry::Ready {
@@ -164,6 +227,8 @@ impl ImageCache {
                         edge,
                         downscaled: false,
                         upgrading: false,
+                        color,
+                        luma,
                     },
                     (Err(_), _) => Entry::Failed,
                 };
@@ -184,7 +249,7 @@ impl ImageCache {
         if cache.used_bytes <= BUDGET_BYTES {
             return;
         }
-        let mut ready: Vec<(u64, SharedString)> = cache
+        let mut ready: Vec<(u64, Key)> = cache
             .entries
             .iter()
             .filter_map(|(key, entry)| match entry {
@@ -306,15 +371,21 @@ fn trim_disk() {
 }
 
 /// Decode, downscale and convert to the BGRA layout the renderer wants.
-fn decode(bytes: &[u8], edge: u32) -> anyhow::Result<Decoded> {
+fn decode(bytes: &[u8], variant: Variant) -> anyhow::Result<Decoded> {
     let decoded = image::load_from_memory(bytes)?;
     let source_edge = decoded.width().max(decoded.height());
-    let (decoded, edge) = if source_edge > edge {
-        (decoded.resize(edge, edge, FilterType::CatmullRom), edge)
-    } else {
-        (decoded, source_edge)
+    let (decoded, edge) = match variant {
+        Variant::Sized(edge) if source_edge > edge => {
+            (decoded.resize(edge, edge, FilterType::CatmullRom), edge)
+        }
+        Variant::Sized(_) => (decoded, source_edge),
+        Variant::Backdrop => {
+            let small = decoded.resize_exact(BACKDROP_EDGE, BACKDROP_EDGE, FilterType::Triangle);
+            (small.blur(3.5), BACKDROP_EDGE)
+        }
     };
     let mut rgba: RgbaImage = decoded.into_rgba8();
+    let (color, luma) = average(&rgba);
     for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
@@ -325,13 +396,43 @@ fn decode(bytes: &[u8], edge: u32) -> anyhow::Result<Decoded> {
         bytes,
         edge,
         downscaled: source_edge > edge,
+        color,
+        luma,
     })
+}
+
+/// The image's average color, made vivid enough to glow with, and its
+/// average lightness.
+fn average(rgba: &RgbaImage) -> (Hsla, f32) {
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    // Every few pixels is plenty for an average.
+    for pixel in rgba.pixels().step_by(7) {
+        r += u64::from(pixel[0]);
+        g += u64::from(pixel[1]);
+        b += u64::from(pixel[2]);
+        n += 1;
+    }
+    let n = n.max(1) as f32 * 255.0;
+    let luma = 0.2126 * (r as f32 / n) + 0.7152 * (g as f32 / n) + 0.0722 * (b as f32 / n);
+    let color: Hsla = Rgba {
+        r: r as f32 / n,
+        g: g as f32 / n,
+        b: b as f32 / n,
+        a: 1.0,
+    }
+    .into();
+    let glow = Hsla {
+        s: (color.s * 1.4).clamp(0.35, 0.9),
+        l: color.l.clamp(0.45, 0.7),
+        ..color
+    };
+    (glow, luma)
 }
 
 #[cfg(test)]
 mod tests {
     // Named imports: a glob would pull in GPUI's `test` attribute and shadow the built-in one.
-    use super::decode;
+    use super::{Variant, decode};
     use image::RgbaImage;
 
     #[test]
@@ -356,7 +457,7 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
 
-        let decoded = decode(&png, 32).unwrap();
+        let decoded = decode(&png, Variant::Sized(32)).unwrap();
         let (image, bytes) = (decoded.image, decoded.bytes);
         assert!(decoded.downscaled);
         let size = image.size(0);
