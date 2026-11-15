@@ -39,6 +39,8 @@ fn main() {
     };
     #[cfg(target_os = "linux")]
     name_audio_stream();
+    #[cfg(target_os = "linux")]
+    keep_discrete_gpu_asleep();
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(|cx| {
@@ -98,5 +100,47 @@ fn name_audio_stream() {
         );
         // SAFETY: first thing in main, before any other thread exists.
         unsafe { std::env::set_var("PIPEWIRE_ALSA", props) };
+    }
+}
+
+/// When the window opens, wgpu lists every GPU, and on a hybrid laptop that
+/// loads the NVIDIA Vulkan driver and wakes the discrete GPU: over a second
+/// before the first frame, and power drawn for nothing, since the GPU
+/// driving the displays is the one that draws Lilac. Skip that driver when
+/// another GPU drives the displays, unless the user chose drivers themselves.
+#[cfg(target_os = "linux")]
+fn keep_discrete_gpu_asleep() {
+    const CHOSEN: [&str; 4] = [
+        "VK_DRIVER_FILES",
+        "VK_ICD_FILENAMES",
+        "VK_LOADER_DRIVERS_SELECT",
+        "VK_LOADER_DRIVERS_DISABLE",
+    ];
+    if CHOSEN.iter().any(|var| std::env::var_os(var).is_some()) {
+        return;
+    }
+    let Ok(devices) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return;
+    };
+    let read = |dev: &std::path::Path, file: &str| {
+        std::fs::read_to_string(dev.join(file))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let (mut nvidia, mut other_drives_displays) = (false, false);
+    for dev in devices.flatten().map(|d| d.path()) {
+        // PCI class 0x03: display controllers.
+        if !read(&dev, "class").starts_with("0x03") {
+            continue;
+        }
+        if read(&dev, "vendor") == "0x10de" {
+            nvidia = true;
+        } else if read(&dev, "boot_vga") == "1" {
+            other_drives_displays = true;
+        }
+    }
+    if nvidia && other_drives_displays {
+        // SAFETY: called from main before any other thread exists.
+        unsafe { std::env::set_var("VK_LOADER_DRIVERS_DISABLE", "*nvidia*") };
     }
 }
