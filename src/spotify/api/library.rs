@@ -87,6 +87,12 @@ impl Api {
             .collect())
     }
 
+    /// The newest recently played track, the context it played from and when.
+    pub async fn last_played(&self) -> Result<Option<PlayedItem>> {
+        let page: Page<PlayedItem> = self.get("/me/player/recently-played?limit=1").await?;
+        Ok(page.items.into_iter().find(|i| i.item.is_some()))
+    }
+
     pub async fn top_tracks(&self, range: &str, limit: u32) -> Result<Vec<Track>> {
         let page: Page<Track> = self
             .get(&format!("/me/top/tracks?time_range={range}&limit={limit}"))

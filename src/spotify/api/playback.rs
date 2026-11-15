@@ -13,6 +13,15 @@ use super::Api;
 use crate::model::*;
 
 impl Api {
+    /// Current playback anywhere on the account; `None` when nothing is
+    /// active (204).
+    pub async fn remote_state(&self) -> Result<Option<RemoteState>> {
+        match self.send(Method::GET, "/me/player", None).await? {
+            Some(text) if !text.trim().is_empty() => Ok(serde_json::from_str(&text).ok()),
+            _ => Ok(None),
+        }
+    }
+
     pub async fn remote_devices(&self) -> Result<RemoteDevices> {
         self.get("/me/player/devices").await
     }

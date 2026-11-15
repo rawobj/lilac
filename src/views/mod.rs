@@ -4,6 +4,7 @@ mod login;
 mod overlays;
 mod player_bar;
 mod sidebar;
+mod splash;
 mod top_bar;
 
 use std::collections::HashMap;
@@ -18,13 +19,13 @@ use crate::nav::Route;
 use crate::panels::RightPanelView;
 use crate::session::Status;
 use crate::theme;
-use crate::ui::{self, icons};
 use crate::ui_state::Dialog;
 use crate::ui_state::RightPanel;
 
 use login::LoginView;
 use player_bar::PlayerBar;
 use sidebar::Sidebar;
+use splash::{Splash, SplashEvent};
 use top_bar::TopBar;
 
 /// Wrap a child view so it is only re-rendered when it changes itself.
@@ -103,6 +104,9 @@ pub struct Lilac {
     menu_scroll: ScrollHandle,
     dialog_scroll: ScrollHandle,
     shown_dialog: Option<Dialog>,
+    /// The loading screen, from start (or login) until the player is warm.
+    splash: Option<Entity<Splash>>,
+    splash_done: bool,
 }
 
 impl Lilac {
@@ -116,8 +120,17 @@ impl Lilac {
         );
 
         cx.observe(&session, |this: &mut Self, session, cx| {
-            if session.read(cx).status == Status::LoggedOut {
-                this.pages.clear();
+            match session.read(cx).status {
+                Status::LoggedOut => {
+                    this.pages.clear();
+                    this.splash = None;
+                    this.splash_done = false;
+                }
+                // A fresh login warms up like a start with stored credentials.
+                Status::LoggedIn if this.splash.is_none() && !this.splash_done => {
+                    this.show_splash(cx);
+                }
+                _ => {}
             }
             cx.notify();
         })
@@ -138,7 +151,7 @@ impl Lilac {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
 
-        Self {
+        let mut this = Self {
             focus,
             login: cx.new(|_| LoginView),
             top_bar: cx.new(|cx| TopBar::new(window, cx)),
@@ -152,7 +165,26 @@ impl Lilac {
             menu_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             shown_dialog: None,
+            splash: None,
+            splash_done: false,
+        };
+        if session.read(cx).status != Status::LoggedOut {
+            this.show_splash(cx);
         }
+        this
+    }
+
+    fn show_splash(&mut self, cx: &mut Context<Self>) {
+        let splash = cx.new(Splash::new);
+        cx.subscribe(&splash, |this, _, event: &SplashEvent, cx| match event {
+            SplashEvent::Done => {
+                this.splash = None;
+                this.splash_done = true;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.splash = Some(splash);
     }
 
     /// Prefill the dialog fields when a dialog opens.
@@ -246,23 +278,6 @@ impl Lilac {
                     .right(px(-80.0)),
             )
     }
-
-    fn splash(&self) -> Div {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .child(
-                svg()
-                    .path(icons::LILAC)
-                    .size(px(48.0))
-                    .text_color(theme::accent()),
-            )
-            .child(ui::spinner(22.0))
-    }
 }
 
 impl Render for Lilac {
@@ -277,7 +292,8 @@ impl Render for Lilac {
         };
 
         let content = match status {
-            Status::Starting => self.splash().into_any_element(),
+            // Covered by the loading screen.
+            Status::Starting => div().into_any_element(),
             Status::LoggedOut | Status::WaitingForBrowser => self.login.clone().into_any_element(),
             Status::LoggedIn if immersive => {
                 crate::pages::immersive::render(window, cx).into_any_element()
@@ -370,6 +386,7 @@ impl Render for Lilac {
                 cx,
             ))
             .children(overlays::toasts(cx))
+            .children(self.splash.clone())
     }
 }
 

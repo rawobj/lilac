@@ -17,8 +17,9 @@ use librespot_connect::{
 };
 use librespot_core::authentication::Credentials;
 use librespot_core::config::{DeviceType, SessionConfig};
-use librespot_core::dealer::protocol::Message;
+use librespot_core::dealer::protocol::{Message, TransferOptions};
 use librespot_core::session::Session;
+use librespot_core::spclient::TransferRequest;
 use librespot_core::spotify_uri::SpotifyUri;
 use librespot_playback::audio_backend;
 use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
@@ -224,10 +225,11 @@ impl Backend {
         start: Start,
         shuffle: bool,
         active: bool,
+        paused_at: Option<u32>,
     ) -> Result<()> {
         let options = LoadRequestOptions {
-            start_playing: true,
-            seek_to: 0,
+            start_playing: paused_at.is_none(),
+            seek_to: paused_at.unwrap_or(0),
             context_options: Some(LoadContextOptions::Options(ContextOptions {
                 shuffle,
                 ..ContextOptions::default()
@@ -268,6 +270,21 @@ impl Backend {
     /// Pull playback over from whichever device has it.
     pub fn take_over(&self) -> Result<()> {
         self.spirc.transfer(None).map_err(spirc_error)
+    }
+
+    /// Bring the account's last session here without playing it: the track
+    /// is loaded and buffered at the position it was left at, so Play only
+    /// has to start the speaker.
+    pub fn restore_paused(&self) -> Result<()> {
+        let request = TransferRequest {
+            transfer_options: TransferOptions {
+                restore_paused: Some("pause".into()),
+                restore_position: Some("restore".into()),
+                restore_track: Some("select".into()),
+                retain_session: None,
+            },
+        };
+        self.spirc.transfer(Some(request)).map_err(spirc_error)
     }
 
     pub fn play(&self) {

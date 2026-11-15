@@ -56,7 +56,7 @@ impl AppState {
         cx.set_global(AppState {
             session,
             library,
-            player,
+            player: player.clone(),
             nav,
             ui,
             search,
@@ -64,6 +64,8 @@ impl AppState {
             feed,
             friends,
         });
+        // Connect to Spotify while the stored login is still being checked.
+        player.update(cx, |player, cx| player.start_with_stored_login(cx));
     }
 }
 

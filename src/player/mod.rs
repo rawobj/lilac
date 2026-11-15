@@ -8,6 +8,7 @@
 
 mod backend;
 pub mod queue;
+mod resume;
 mod sink;
 
 use std::time::{Duration, Instant};
@@ -24,12 +25,13 @@ use crate::settings::Settings;
 use backend::{Backend, Channels, Cluster, EngineEvent, Options, Start};
 pub use backend::{Device, DeviceKind};
 pub use queue::{Queue, Repeat};
+use resume::LastSession;
 
 /// Restart the current track instead of going to the previous one past this point.
 const RESTART_THRESHOLD_MS: u32 = 3000;
-/// Connect the streaming session this long after login, once the first
-/// screen has what it needs from the network.
-const CONNECT_DELAY: Duration = Duration::from_secs(2);
+/// Give up waiting for the restored session after this; the loading screen
+/// must never hold the app hostage to a slow network.
+const RESTORE_TIMEOUT: Duration = Duration::from_millis(4500);
 /// Spirc handles one command at a time and uploads its state after each, so
 /// a burst of seeks or volume steps would queue up network round trips.
 /// Bursts are collapsed: the first change goes out at once, the last one
@@ -40,6 +42,18 @@ const HOVER_PRELOAD: Duration = Duration::from_millis(150);
 /// Volume reports from Spotify this soon after a local change are echoes of
 /// older steps and would make the slider jump back.
 const VOLUME_ECHO: Duration = Duration::from_millis(1500);
+
+/// How far the player has come since login; the loading screen shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warmup {
+    /// Not logged in yet.
+    Idle,
+    /// Logging in to Spotify's streaming servers.
+    Connecting,
+    /// Bringing the last session over, paused where it was left.
+    Restoring,
+    Ready,
+}
 
 pub enum PlayerEvent {
     /// A different track became current.
@@ -95,6 +109,16 @@ pub struct Player {
     pending_seek: Option<u32>,
     seek_settle: Option<Task<()>>,
     hover_preload: Option<Task<()>>,
+    pub warmup: Warmup,
+    restore: Option<Task<()>>,
+    /// Play was pressed while the last session was still on its way here.
+    play_when_ready: bool,
+    restore_lookup: Option<
+        tokio::task::JoinHandle<(
+            Option<crate::model::RemoteState>,
+            Option<crate::model::PlayedItem>,
+        )>,
+    >,
     queue_refresh: Option<Task<()>>,
     /// Track URIs of the context we started, in order, to find the next
     /// track without waiting for the Web API (which lags by seconds).
@@ -111,23 +135,40 @@ impl Player {
     pub fn new(session: &Entity<Session>, settings: &Settings, cx: &mut Context<Self>) -> Self {
         cx.subscribe(session, |this, session, event, cx| match event {
             SessionEvent::Ready if !session.read(cx).is_demo() => {
-                // Join the user's Connect devices without waiting for a first play.
-                this.starting = Some(cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(CONNECT_DELAY).await;
-                    this.update(cx, |this, cx| {
-                        this.starting = None;
-                        this.ensure_backend(cx);
-                    })
-                    .ok();
-                }));
+                // The loading screen covers this, so there is no reason to
+                // wait for a first play: connect, join the user's devices and
+                // bring the last session over right away. (With a stored
+                // login this already started at launch.)
+                this.liked_uri = session
+                    .read(cx)
+                    .user
+                    .as_ref()
+                    .map(|u| format!("spotify:user:{}:collection", u.id));
+                if this.warmup == Warmup::Idle {
+                    this.warmup = Warmup::Connecting;
+                }
+                this.ensure_backend(cx);
+                cx.notify();
             }
-            SessionEvent::Ready => {}
+            SessionEvent::Ready => {
+                this.warmup = Warmup::Ready;
+                cx.notify();
+            }
             SessionEvent::LoggedOut => {
                 this.stop(cx);
                 this.drop_backend();
                 this.devices.clear();
                 this.active_device = None;
+                this.warmup = Warmup::Idle;
+                LastSession::forget();
             }
+        })
+        .detach();
+
+        // Remember the position on the way out; it is the one that matters.
+        cx.on_app_quit(|this, _| {
+            this.save_session();
+            async {}
         })
         .detach();
 
@@ -179,6 +220,10 @@ impl Player {
             pending_seek: None,
             seek_settle: None,
             hover_preload: None,
+            warmup: Warmup::Idle,
+            restore: None,
+            play_when_ready: false,
+            restore_lookup: None,
             queue_refresh: None,
             started_tracks: Vec::new(),
             spirc_active: false,
@@ -346,6 +391,201 @@ impl Player {
         );
     }
 
+    /// A stored login is enough to start connecting; checking it against the
+    /// Web API (which the session does at the same time) need not come
+    /// first. Called once app state exists.
+    pub fn start_with_stored_login(&mut self, cx: &mut Context<Self>) {
+        let session = app::session(cx).read(cx);
+        if session.status == crate::session::Status::Starting
+            && !session.is_demo()
+            && session.streaming.has_credentials()
+        {
+            self.warmup = Warmup::Connecting;
+            self.show_saved_session(cx);
+            self.ensure_backend(cx);
+        }
+    }
+
+    /// Show the track Lilac was left on straight from disk; the streaming
+    /// session takes seconds to load it, and the loading screen need not
+    /// wait for that.
+    fn show_saved_session(&mut self, cx: &mut Context<Self>) {
+        let Some(saved) = LastSession::load() else {
+            return;
+        };
+        if let Some(track) = saved.track() {
+            self.current = Some(track);
+            self.playing = false;
+            self.anchor(saved.position_ms);
+            cx.emit(PlayerEvent::TrackChanged);
+            cx.notify();
+        }
+    }
+
+    /// The warm-up is over, whichever way it ended; a Play pressed during it
+    /// happens now.
+    fn finish_warmup(&mut self, cx: &mut Context<Self>) {
+        self.warmup = Warmup::Ready;
+        if std::mem::take(&mut self.play_when_ready) {
+            self.loading = false;
+            self.resume(cx);
+        }
+    }
+
+    /// Bring the account's last session to this device, paused and buffered
+    /// at the position it was left at, so the first Play is instant. Not
+    /// when another device is playing: that would stop it.
+    fn restore_session(&mut self, cx: &mut Context<Self>) {
+        self.warmup = Warmup::Restoring;
+        cx.notify();
+        // Fetching the saved track needs no activation, which takes
+        // librespot a couple of seconds after connecting; overlap the two.
+        if let (Some(backend), Some(saved)) = (self.backend(), LastSession::load()) {
+            backend.preload(&saved.track_uri);
+        }
+        let lookup = self.restore_lookup.take();
+        self.restore = Some(cx.spawn(async move |this, cx| {
+            let (state, last) = match lookup {
+                Some(lookup) => lookup.await.unwrap_or((None, None)),
+                None => (None, None),
+            };
+            let restoring = this
+                .update(cx, |this, cx| this.start_restore(state, last, cx))
+                .unwrap_or(false);
+            if restoring {
+                // Ready once librespot reports the restored track (see
+                // `on_engine_event`), or after the timeout regardless.
+                cx.background_executor().timer(RESTORE_TIMEOUT).await;
+            }
+            this.update(cx, |this, cx| {
+                if this.warmup != Warmup::Ready && this.current.is_none() {
+                    // Nothing came back: at least warm the connections.
+                    this.warm_up(cx);
+                }
+                this.restore = None;
+                this.finish_warmup(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Decide what to bring back, in order of preference: what another
+    /// device is playing (shown, not taken over), a session Spotify still
+    /// holds, the session Lilac saved itself, the last played track.
+    /// Returns whether librespot was asked to load something.
+    fn start_restore(
+        &mut self,
+        state: Option<crate::model::RemoteState>,
+        last: Option<crate::model::PlayedItem>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let last = last.and_then(|i| {
+            let played_at = resume::parse_utc(&i.played_at).unwrap_or(0);
+            let context = i.context.map(|c| c.uri).filter(|u| !u.is_empty());
+            Some((i.item?, context, played_at))
+        });
+        let ours = self.device_id().map(str::to_string);
+        if self.backend().is_none() {
+            return false;
+        }
+        if let Some(state) = state.filter(|s| s.item.is_some()) {
+            let device = state.device.as_ref().and_then(|d| d.id.clone());
+            if state.is_playing && device != ours {
+                // Show what the other device plays; the controls drive it.
+                self.active_device = device;
+                self.current = state.item;
+                self.playing = true;
+                self.anchor(state.progress_ms.unwrap_or(0));
+                cx.emit(PlayerEvent::TrackChanged);
+                return false;
+            }
+            // Another device holds a paused session: bring it here, paused.
+            if self.backend().is_some_and(|b| b.restore_paused().is_ok()) {
+                self.current = state.item;
+                self.playing = false;
+                self.anchor(state.progress_ms.unwrap_or(0));
+                cx.emit(PlayerEvent::TrackChanged);
+                return true;
+            }
+        }
+
+        // Our own record is exact (position included) unless something was
+        // played elsewhere after it was written. Spotify lists a track as
+        // played only after about 30 seconds, so the same track counts too.
+        let saved = LastSession::load().filter(|saved| {
+            last.as_ref().is_none_or(|(track, _, played_at)| {
+                track.uri.as_ref() == saved.track_uri || saved.saved_at >= *played_at
+            })
+        });
+        let session = match (saved, &last) {
+            (Some(saved), _) => saved,
+            (None, Some((track, context, _))) => {
+                LastSession::new(&track.uri, context.as_deref(), &[track.uri.to_string()], 0)
+            }
+            (None, None) => return false,
+        };
+        let start = match &session.context_uri {
+            Some(_) => Start::Uri(session.track_uri.clone()),
+            None => Start::Index(
+                session
+                    .tracks
+                    .iter()
+                    .position(|t| *t == session.track_uri)
+                    .unwrap_or(0) as u32,
+            ),
+        };
+        let tracks = if session.tracks.is_empty() {
+            vec![session.track_uri.clone()]
+        } else {
+            session.tracks.clone()
+        };
+        let Some(backend) = self.backend() else {
+            return false;
+        };
+        if backend
+            .load(
+                session.context_uri.as_deref(),
+                &tracks,
+                start,
+                self.connect_shuffle,
+                false,
+                Some(session.position_ms),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        self.connect_context = session.context_uri.clone();
+        self.started_tracks = tracks;
+        if let Some((track, _, _)) = last.filter(|(t, _, _)| t.uri.as_ref() == session.track_uri) {
+            // Show it at once; librespot confirms with its own events.
+            self.current = Some(track);
+            self.playing = false;
+            self.anchor(session.position_ms);
+            cx.emit(PlayerEvent::TrackChanged);
+        }
+        true
+    }
+
+    /// Remember what plays and where, for the next start.
+    fn save_session(&self) {
+        let (Some(_), Some(track)) = (&self.backend, &self.current) else {
+            return;
+        };
+        if self.remote_device().is_some() {
+            return;
+        }
+        LastSession::new(
+            &track.uri,
+            self.connect_context.as_deref(),
+            &self.started_tracks,
+            self.position_ms(),
+        )
+        .with_track(track)
+        .save();
+    }
+
     /// Before the first play, every connection a track needs (CDN, audio
     /// keys, storage lookups) is still cold, which adds a second or more.
     /// Preloading the last played track opens them, and makes picking up
@@ -455,7 +695,12 @@ impl Player {
             }
             return;
         }
-        if self.playing {
+        if self.play_when_ready {
+            self.play_when_ready = false;
+            self.loading = false;
+            cx.emit(PlayerEvent::StateChanged);
+            cx.notify();
+        } else if self.playing {
             self.pause(cx);
         } else {
             self.resume(cx);
@@ -485,6 +730,15 @@ impl Player {
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
         if self.playing || self.current.is_none() {
+            return;
+        }
+        if (self.starting.is_some() || self.restore.is_some()) && self.remote_device().is_none() {
+            // The last session is still being loaded here; Play now would
+            // race it. Play it the moment it is ready.
+            self.play_when_ready = true;
+            self.loading = true;
+            cx.emit(PlayerEvent::StateChanged);
+            cx.notify();
             return;
         }
         self.anchor_at = Instant::now();
@@ -920,6 +1174,7 @@ impl Player {
                     load.start,
                     shuffle,
                     active,
+                    None,
                 ) {
                     app::toast_error(format!("{err:#}"), cx);
                 }
@@ -966,13 +1221,19 @@ impl Player {
         let options = Options::from_settings(app::settings(cx).read(cx));
         let auth = app::session(cx).read(cx).streaming.clone();
         let volume = self.effective_volume();
-        self.liked_uri = app::session(cx)
-            .read(cx)
-            .user
-            .as_ref()
-            .map(|u| format!("spotify:user:{}:collection", u.id));
+        // What to restore is asked while the streaming session connects.
+        let api = app::api(cx);
+        self.restore_lookup = Some(runtime::spawn(async move {
+            let (state, last) = tokio::join!(api.remote_state(), api.last_played());
+            (state.ok().flatten(), last.ok().flatten())
+        }));
+        // Spawned here rather than inside the UI task: that is first polled
+        // only after the window is up, and connecting need not wait for it.
+        let start = runtime::spawn(Backend::start(auth, options, volume));
         self.starting = Some(cx.spawn(async move |this, cx| {
-            let result = runtime::run(Backend::start(auth, options, volume)).await;
+            let result = start
+                .await
+                .unwrap_or_else(|err| Err(anyhow::anyhow!("background task failed: {err}")));
             this.update(cx, |this, cx| {
                 this.starting = None;
                 match result {
@@ -981,8 +1242,7 @@ impl Player {
                         this.backend = Some(backend);
                         // Our own registration needs a moment to show up in the list.
                         this.refresh_devices(Duration::from_millis(1500), cx);
-                        // Open the connections a first play needs.
-                        this.warm_up(cx);
+                        this.restore_session(cx);
                         if let Some(load) = this.pending.take() {
                             this.load(load, cx);
                         }
@@ -998,6 +1258,8 @@ impl Player {
                         if had_request {
                             app::toast_error(format!("{err:#}"), cx);
                         }
+                        this.play_when_ready = false;
+                        this.warmup = Warmup::Ready;
                         cx.emit(PlayerEvent::StateChanged);
                         cx.notify();
                     }
@@ -1061,6 +1323,7 @@ impl Player {
                 self.current = Some(known.unwrap_or_else(|| track_from_audio_item(&audio_item)));
                 self.anchor_ms = 0;
                 self.anchor_at = Instant::now();
+                self.save_session();
                 // Spotify does not push our own changes; read what comes next.
                 self.refresh_queue(cx);
                 self.preload_next_started();
@@ -1075,14 +1338,25 @@ impl Player {
                 cx.notify();
             }
             EngineEvent::Paused { position_ms, .. } => {
+                let restored = self.warmup == Warmup::Restoring;
                 self.loading = false;
                 self.playing = false;
                 self.anchor(position_ms);
+                if restored {
+                    // The restored track is loaded and buffered.
+                    self.restore = None;
+                    self.finish_warmup(cx);
+                }
+                self.save_session();
                 cx.emit(PlayerEvent::StateChanged);
                 cx.notify();
             }
-            EngineEvent::Seeked { position_ms, .. }
-            | EngineEvent::PositionCorrection { position_ms, .. }
+            EngineEvent::Seeked { position_ms, .. } => {
+                self.anchor(position_ms);
+                self.save_session();
+                cx.notify();
+            }
+            EngineEvent::PositionCorrection { position_ms, .. }
             | EngineEvent::PositionChanged { position_ms, .. } => {
                 self.anchor(position_ms);
                 cx.notify();
@@ -1113,6 +1387,14 @@ impl Player {
                     (false, false) => Repeat::Off,
                 };
                 cx.notify();
+            }
+            EngineEvent::VolumeChanged { .. } if self.warmup != Warmup::Ready => {
+                // On activation librespot applies the volume Spotify stored
+                // for this device last time; Lilac's own setting wins.
+                if let Some(backend) = self.backend() {
+                    backend.set_local_volume(self.effective_volume());
+                    backend.set_volume(self.effective_volume());
+                }
             }
             EngineEvent::VolumeChanged { volume } => {
                 // Our own changes come back here too, late and possibly stale.

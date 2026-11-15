@@ -442,6 +442,23 @@ pub struct SavedItem {
     pub item: Option<Track>,
 }
 
+/// One entry of the recently played list.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PlayedItem {
+    #[serde(default, alias = "track", alias = "episode")]
+    pub item: Option<Track>,
+    #[serde(default)]
+    pub played_at: String,
+    #[serde(default)]
+    pub context: Option<PlayedContext>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PlayedContext {
+    #[serde(default)]
+    pub uri: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SavedAlbum {
     #[serde(default)]
@@ -479,6 +496,19 @@ impl SearchResults {
             && self.shows.items.is_empty()
             && self.episodes.items.is_empty()
     }
+}
+
+/// What the account is playing, or last played, as the Web API reports it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RemoteState {
+    #[serde(default)]
+    pub device: Option<RemoteDevice>,
+    #[serde(default)]
+    pub is_playing: bool,
+    #[serde(default)]
+    pub progress_ms: Option<u32>,
+    #[serde(default)]
+    pub item: Option<Track>,
 }
 
 /// A device as the Web API lists it.

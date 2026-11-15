@@ -74,6 +74,11 @@ pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }
 
+/// What was playing and where, to pick it up again on the next start.
+pub fn last_session_file() -> PathBuf {
+    config_dir().join("last-session.json")
+}
+
 /// A random id for this installation, kept across runs so Spotify sees one
 /// device rather than a new one on every start.
 pub fn device_id() -> String {
