@@ -23,6 +23,8 @@ mod session;
 mod settings;
 mod single_instance;
 mod spotify;
+#[cfg(target_os = "linux")]
+mod system_volume;
 mod theme;
 mod ui;
 mod ui_state;
@@ -35,6 +37,8 @@ fn main() {
         // The running Lilac brings its window to the front.
         return;
     };
+    #[cfg(target_os = "linux")]
+    name_audio_stream();
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(|cx| {
@@ -79,4 +83,20 @@ fn main() {
             })
             .detach();
         });
+}
+
+/// Our audio goes out through ALSA, which PipeWire otherwise lists as
+/// "PipeWire ALSA [lilac]" in the desktop's volume mixer.
+#[cfg(target_os = "linux")]
+fn name_audio_stream() {
+    if std::env::var_os("PIPEWIRE_ALSA").is_none() {
+        // The process id lets `system_volume` recognise its own stream; the
+        // ALSA plugin does not set it.
+        let props = format!(
+            r#"{{ application.name = "Lilac" node.description = "Lilac" media.name = "Lilac" media.role = "Music" application.process.id = "{}" }}"#,
+            std::process::id()
+        );
+        // SAFETY: first thing in main, before any other thread exists.
+        unsafe { std::env::set_var("PIPEWIRE_ALSA", props) };
+    }
 }

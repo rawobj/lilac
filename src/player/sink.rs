@@ -4,7 +4,8 @@
 //! queued, applies volume before queueing and drains the queue before
 //! pausing, so every control was heard half a second late. Here:
 //!
-//! - volume is applied as samples leave for the speaker,
+//! - volume is the stream's volume in the sound server (see
+//!   `system_volume`), or applied as samples leave for the speaker,
 //! - pause holds the queue where it is and resume continues from it,
 //! - seek, skip and load drop what is queued ([`OutputControl::flush`]),
 //!
@@ -103,7 +104,7 @@ impl OutputMixer {
 }
 
 impl OutputMixer {
-    /// A change made in Lilac (slider, keys, mute).
+    /// A change made in Lilac (slider, keys, mute, desktop mixer).
     pub fn set_local(&self, volume: u16) {
         if let Ok(mut at) = self.local_at.lock() {
             *at = Some(std::time::Instant::now());
@@ -113,6 +114,14 @@ impl OutputMixer {
 
     fn apply(&self, volume: u16) {
         self.volume.store(volume, Ordering::Relaxed);
+        // With a sound server the stream's own volume is the one volume, the
+        // same one the desktop's mixer shows; the samples pass unchanged.
+        #[cfg(target_os = "linux")]
+        if crate::system_volume::available() {
+            crate::system_volume::set(volume as f32 / u16::MAX as f32);
+            self.out.gain.store(1.0f32.to_bits(), Ordering::Relaxed);
+            return;
+        }
         let gain = self.ctrl.to_mapped(volume) as f32;
         self.out.gain.store(gain.to_bits(), Ordering::Relaxed);
     }

@@ -131,6 +131,27 @@ impl Player {
         })
         .detach();
 
+        // Follow the volume the desktop's mixer sets for our stream.
+        #[cfg(target_os = "linux")]
+        {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            crate::system_volume::start(move |volume| {
+                let _ = tx.send(volume);
+            });
+            crate::system_volume::set(settings.volume.clamp(0.0, 1.0));
+            cx.spawn(async move |this, cx| {
+                while let Some(volume) = rx.recv().await {
+                    if this
+                        .update(cx, |this, cx| this.adopt_volume(volume, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         Self {
             queue: Queue::default(),
             current: None,
@@ -620,6 +641,19 @@ impl Player {
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume.clamp(0.0, 1.0);
         self.muted = false;
+        self.apply_volume(cx);
+        cx.notify();
+    }
+
+    /// The volume was changed outside Lilac (the desktop's mixer).
+    #[cfg(target_os = "linux")]
+    fn adopt_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
+        if (self.muted && volume == 0.0) || (volume - self.effective_volume()).abs() < 0.005 {
+            return;
+        }
+        self.volume = volume.clamp(0.0, 1.0);
+        self.muted = false;
+        // Spotify and the settings file hear about it like any other change.
         self.apply_volume(cx);
         cx.notify();
     }
