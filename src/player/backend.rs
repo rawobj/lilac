@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 
 pub use librespot_playback::player::PlayerEvent as EngineEvent;
 
-use super::sink::{InstantSink, OutputControl, OutputMixer};
+use super::sink::{Cue, InstantSink, OutputControl, OutputMixer};
 use crate::settings::{Quality, Settings};
 use crate::spotify::api::Auth;
 use crate::spotify::oauth;
@@ -106,6 +106,8 @@ pub struct Backend {
 pub struct Channels {
     pub engine: PlayerEventChannel,
     pub cluster: mpsc::UnboundedReceiver<Cluster>,
+    /// What the speaker does; see [`Backend::output`].
+    pub cues: mpsc::UnboundedReceiver<Cue>,
 }
 
 impl Backend {
@@ -128,6 +130,7 @@ impl Backend {
         // Volume is applied by our sink as samples leave for the speaker,
         // not by librespot before they are queued.
         let output = OutputControl::new(1.0);
+        let cues = output.cues();
         let mixer = Arc::new(OutputMixer::new(output.clone(), to_mixer(volume)));
 
         let sink = audio_backend::find(None).context("no audio backend compiled in")?;
@@ -207,8 +210,15 @@ impl Backend {
             Channels {
                 engine: engine_events,
                 cluster,
+                cues,
             },
         ))
+    }
+
+    /// The audio output's clock, when our sink plays (it does unless no
+    /// audio device could be opened).
+    pub fn output(&self) -> Option<&OutputControl> {
+        self.output.in_use().then_some(&*self.output)
     }
 
     /// False once the access point connection dropped; a new backend is needed then.

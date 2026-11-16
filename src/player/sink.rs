@@ -11,9 +11,14 @@
 //!
 //! so a quarter second of queue protects against stutter without making
 //! anything wait for it.
+//!
+//! The sink is also the player's clock: it knows when audio actually starts
+//! and stops coming out ([`Cue`]) and how much of it has been heard, so the
+//! controls and the seek bar show what the speaker does, not what was asked.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -27,6 +32,7 @@ use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 use rodio::cpal::traits::HostTrait as _;
 use rodio::{DeviceTrait as _, OutputStream, OutputStreamBuilder};
+use tokio::sync::mpsc;
 
 /// Audio queued ahead of the speaker. Counted in samples, not packets:
 /// Vorbis packets range from ~3 to ~23 ms, so a packet count can leave only
@@ -39,6 +45,22 @@ const QUEUE_SAMPLES: usize =
 /// feel immediate and slow enough not to click.
 const GAIN_SMOOTHING: f32 = 0.0025;
 
+/// Samples (all channels) per millisecond of audio.
+const SAMPLES_PER_MS: u64 = SAMPLE_RATE as u64 * NUM_CHANNELS as u64 / 1000;
+
+/// What the speaker just did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cue {
+    /// Audio started coming out: after a play, or after a seek, skip or
+    /// load replaced what was queued.
+    Started,
+    /// The output went silent: paused or stopped.
+    Stopped,
+}
+
+/// No generation is audible.
+const SILENT: u64 = u64::MAX;
+
 /// Shared between the sink (audio thread), the mixer (Spirc) and the backend.
 #[derive(Default)]
 pub struct OutputControl {
@@ -50,6 +72,17 @@ pub struct OutputControl {
     generation: AtomicU64,
     /// Samples appended but not yet played.
     queued: AtomicUsize,
+    /// Samples played since the sink opened.
+    played: AtomicU64,
+    /// The generation whose audio is coming out, or [`SILENT`].
+    audible: AtomicU64,
+    /// Our sink is the one in use (it is not when no device could be opened).
+    in_use: AtomicBool,
+    /// librespot started the sink and has not stopped it. rodio applies a
+    /// pause only every few milliseconds, so samples still trickle out
+    /// after a stop; they must not count as audio starting again.
+    running: AtomicBool,
+    cues: OnceLock<mpsc::UnboundedSender<Cue>>,
 }
 
 impl OutputControl {
@@ -57,7 +90,43 @@ impl OutputControl {
         let control = Self::default();
         control.gain.store(gain.to_bits(), Ordering::Relaxed);
         control.applied.store(gain.to_bits(), Ordering::Relaxed);
+        control.audible.store(SILENT, Ordering::Relaxed);
         Arc::new(control)
+    }
+
+    /// Where [`Cue`]s go.
+    pub fn cues(&self) -> mpsc::UnboundedReceiver<Cue> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = self.cues.set(tx);
+        rx
+    }
+
+    /// Whether audio goes through this control, so its clock and cues apply.
+    pub fn in_use(&self) -> bool {
+        self.in_use.load(Ordering::Relaxed)
+    }
+
+    /// Milliseconds of audio heard since the sink opened.
+    pub fn played_ms(&self) -> u64 {
+        self.played.load(Ordering::Relaxed) / SAMPLES_PER_MS
+    }
+
+    /// Milliseconds of audio decoded but not heard yet.
+    pub fn queued_ms(&self) -> u32 {
+        (self.queued.load(Ordering::Relaxed) as u64 / SAMPLES_PER_MS) as u32
+    }
+
+    fn cue(&self, cue: Cue) {
+        if let Some(tx) = self.cues.get() {
+            let _ = tx.send(cue);
+        }
+    }
+
+    /// The speaker went quiet.
+    fn silence(&self) {
+        if self.audible.swap(SILENT, Ordering::AcqRel) != SILENT {
+            self.cue(Cue::Stopped);
+        }
     }
 
     /// Drop everything queued, for an explicit seek, skip or load: the user
@@ -162,6 +231,7 @@ impl InstantSink {
         let stream = open_stream().map_err(|e| SinkError::ConnectionRefused(e.to_string()))?;
         let sink = rodio::Sink::connect_new(stream.mixer());
         sink.pause();
+        out.in_use.store(true, Ordering::Relaxed);
         Ok(Self {
             sink,
             out,
@@ -202,6 +272,7 @@ fn open_stream() -> Result<OutputStream, rodio::StreamError> {
 
 impl Sink for InstantSink {
     fn start(&mut self) -> SinkResult<()> {
+        self.out.running.store(true, Ordering::Release);
         self.sink.play();
         Ok(())
     }
@@ -210,7 +281,9 @@ impl Sink for InstantSink {
     /// resume then continues exactly where the speaker stopped. Loads and
     /// seeks flush the queue separately.
     fn stop(&mut self) -> SinkResult<()> {
+        self.out.running.store(false, Ordering::Release);
         self.sink.pause();
+        self.out.silence();
         Ok(())
     }
 
@@ -263,6 +336,13 @@ impl Iterator for Counted {
             .out
             .queued
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        self.out.played.fetch_add(1, Ordering::Relaxed);
+        if self.out.running.load(Ordering::Acquire)
+            && self.out.audible.load(Ordering::Relaxed) != self.generation
+            && self.out.audible.swap(self.generation, Ordering::AcqRel) != self.generation
+        {
+            self.out.cue(Cue::Started);
+        }
         if self.gain.is_nan() {
             self.gain = f32::from_bits(self.out.applied.load(Ordering::Relaxed));
         }
@@ -345,5 +425,40 @@ mod tests {
         out.flush();
         assert_eq!(packet.next(), None);
         assert_eq!(out.queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cues_follow_the_audio() {
+        let out = OutputControl::new(1.0);
+        let mut cues = out.cues();
+        let packet = |out: &Arc<OutputControl>| Counted {
+            inner: rodio::buffer::SamplesBuffer::new(2, SAMPLE_RATE, vec![0.5; 4]),
+            generation: out.generation.load(Ordering::Relaxed),
+            gain: 1.0,
+            out: out.clone(),
+        };
+        out.running.store(true, Ordering::Relaxed);
+        let mut first = packet(&out);
+        assert!(cues.try_recv().is_err(), "nothing heard yet");
+        first.next();
+        first.next();
+        assert_eq!(cues.try_recv(), Ok(Cue::Started));
+        assert!(cues.try_recv().is_err(), "one cue per start");
+        // A seek: the new position starting to play is a new start.
+        out.flush();
+        packet(&out).next();
+        assert_eq!(cues.try_recv(), Ok(Cue::Started));
+        // A stop, with samples still trickling out before rodio pauses.
+        out.running.store(false, Ordering::Relaxed);
+        out.silence();
+        assert_eq!(cues.try_recv(), Ok(Cue::Stopped));
+        packet(&out).next();
+        assert!(
+            cues.try_recv().is_err(),
+            "trickle after a stop is not a start"
+        );
+        out.silence();
+        assert!(cues.try_recv().is_err(), "already silent");
+        assert_eq!(out.played.load(Ordering::Relaxed), 4);
     }
 }

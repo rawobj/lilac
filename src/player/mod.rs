@@ -26,6 +26,7 @@ use backend::{Backend, Channels, Cluster, EngineEvent, Options, Start};
 pub use backend::{Device, DeviceKind};
 pub use queue::{Queue, Repeat};
 use resume::LastSession;
+use sink::{Cue, OutputControl};
 
 /// Restart the current track instead of going to the previous one past this point.
 const RESTART_THRESHOLD_MS: u32 = 3000;
@@ -85,9 +86,15 @@ pub struct Player {
     /// Devices in the user's Connect list, and the one playing.
     pub devices: Vec<Device>,
     pub active_device: Option<String>,
-    /// Position at `anchor_at`. While playing, the live position is extrapolated from it.
+    /// Position at `anchor_at`. While playing, the live position is
+    /// extrapolated from it: by the audio heard since (`anchor_heard_ms`)
+    /// when it plays here, by the clock for other devices and demo mode.
     anchor_ms: u32,
     anchor_at: Instant,
+    anchor_heard_ms: u64,
+    /// A track change librespot reported before the old track's queued end
+    /// was heard; applied when it is.
+    track_switch: Option<Task<()>>,
     ticker: Option<Task<()>>,
     backend: Option<Backend>,
     /// The streaming session is being set up.
@@ -205,6 +212,8 @@ impl Player {
             active_device: None,
             anchor_ms: 0,
             anchor_at: Instant::now(),
+            anchor_heard_ms: 0,
+            track_switch: None,
             ticker: None,
             backend: None,
             starting: None,
@@ -237,7 +246,11 @@ impl Player {
     }
 
     pub fn position_ms(&self) -> u32 {
-        let position = if self.playing && !self.loading {
+        let position = if let Some(out) = self.heard() {
+            // Only audio that came out of the speaker moves the position.
+            let heard = out.played_ms().saturating_sub(self.anchor_heard_ms);
+            self.anchor_ms.saturating_add(heard as u32)
+        } else if self.playing && !self.loading {
             self.anchor_ms
                 .saturating_add(self.anchor_at.elapsed().as_millis() as u32)
         } else {
@@ -351,12 +364,14 @@ impl Player {
             ),
         };
 
-        // Show the choice at once; Spotify confirms it a moment later.
+        // Show the choice at once, loading; whether it plays is up to the
+        // speaker here, or Spotify for another device.
         self.current = Some(first);
         self.connect_context = context_uri.clone();
-        self.anchor_ms = 0;
-        self.anchor_at = Instant::now();
-        self.playing = true;
+        self.anchor(0);
+        if self.heard().is_none() {
+            self.playing = true;
+        }
         self.loading = true;
         cx.emit(PlayerEvent::TrackChanged);
         cx.notify();
@@ -463,7 +478,14 @@ impl Player {
                     this.warm_up(cx);
                 }
                 this.restore = None;
-                this.finish_warmup(cx);
+                if restoring && this.warmup == Warmup::Restoring {
+                    // Spotify is slow to take the load, but it is queued: a
+                    // Play pressed meanwhile waits for it (see `Paused`)
+                    // rather than racing it with a transfer.
+                    this.warmup = Warmup::Ready;
+                } else {
+                    this.finish_warmup(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -700,7 +722,7 @@ impl Player {
             self.loading = false;
             cx.emit(PlayerEvent::StateChanged);
             cx.notify();
-        } else if self.playing {
+        } else if self.playing || (self.loading && self.heard().is_some()) {
             self.pause(cx);
         } else {
             self.resume(cx);
@@ -708,6 +730,18 @@ impl Player {
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
+        if self.heard().is_some() {
+            // Shown as paused when the speaker goes quiet (`on_cue`).
+            if let Some(backend) = self.backend() {
+                backend.pause();
+            }
+            if self.loading {
+                self.loading = false;
+                cx.emit(PlayerEvent::StateChanged);
+                cx.notify();
+            }
+            return;
+        }
         if !self.playing {
             return;
         }
@@ -741,8 +775,13 @@ impl Player {
             cx.notify();
             return;
         }
-        self.anchor_at = Instant::now();
-        self.playing = true;
+        if self.heard().is_some() {
+            // Playing once the speaker is (`on_cue`); loading until then.
+            self.loading = true;
+        } else {
+            self.anchor_at = Instant::now();
+            self.playing = true;
+        }
         if self.simulated(cx) {
             self.start_ticker(cx);
         } else if self.remote_device().is_some() {
@@ -753,11 +792,14 @@ impl Player {
         } else if let Some(backend) = self.backend() {
             // Spotify forgets the active device after a while paused, and
             // librespot ignores Play until it is active again.
-            if self.spirc_active {
-                backend.play();
-            } else if let Err(err) = backend.take_over() {
+            if !self.spirc_active
+                && let Err(err) = backend.take_over()
+            {
                 app::toast_error(format!("{err:#}"), cx);
             }
+            // librespot ignores the transfer when it still holds the session
+            // after all; the Play then does it. After a transfer it is a no-op.
+            backend.play();
         } else if let Some(track) = self.current.clone() {
             // The session dropped while paused: pick up where we were.
             let position = self.anchor_ms;
@@ -784,7 +826,8 @@ impl Player {
         self.current = None;
         self.playing = false;
         self.loading = false;
-        self.anchor_ms = 0;
+        self.anchor(0);
+        self.track_switch = None;
         self.ticker = None;
         self.connect_context = None;
         self.mirrored_next.clear();
@@ -843,8 +886,9 @@ impl Player {
             return;
         }
         let position_ms = position_ms.min(self.duration_ms());
-        self.anchor_ms = position_ms;
-        self.anchor_at = Instant::now();
+        if self.heard().is_none() {
+            self.anchor(position_ms);
+        }
         if self.seek_settle.is_some() {
             self.pending_seek = Some(position_ms);
         } else {
@@ -876,6 +920,11 @@ impl Player {
     }
 
     fn send_seek(&mut self, position_ms: u32, cx: &mut Context<Self>) {
+        if self.heard().is_some() {
+            // The queue is dropped with the seek, so from here on what is
+            // heard starts at the new position.
+            self.anchor(position_ms);
+        }
         if self.remote_device().is_some() {
             let api = app::api(cx);
             remote(cx, async move { api.remote_seek(position_ms).await });
@@ -1155,6 +1204,9 @@ impl Player {
     }
 
     fn load(&mut self, load: PendingLoad, cx: &mut Context<Self>) {
+        // What plays next is decided anew; a switch still waiting for the
+        // old queue to be heard is moot.
+        self.track_switch = None;
         // Quality, normalisation and gapless are fixed per librespot player.
         let options = Options::from_settings(app::settings(cx).read(cx));
         if self
@@ -1273,6 +1325,7 @@ impl Player {
         let Channels {
             mut engine,
             mut cluster,
+            mut cues,
         } = channels;
         self.listeners = vec![
             cx.spawn(async move |this, cx| {
@@ -1281,6 +1334,13 @@ impl Player {
                         .update(cx, |this, cx| this.on_engine_event(event, cx))
                         .is_err()
                     {
+                        break;
+                    }
+                }
+            }),
+            cx.spawn(async move |this, cx| {
+                while let Some(cue) = cues.recv().await {
+                    if this.update(cx, |this, cx| this.on_cue(cue, cx)).is_err() {
                         break;
                     }
                 }
@@ -1312,28 +1372,28 @@ impl Player {
         }
         match event {
             EngineEvent::TrackChanged { audio_item } => {
-                // Prefer what the Web API told us about this track (it has
-                // album and artist ids) over librespot's thinner metadata.
-                let known = self
-                    .current
-                    .iter()
-                    .chain(self.queue.upcoming().take(5))
-                    .find(|t| t.uri.as_ref() == audio_item.uri)
-                    .cloned();
-                self.current = Some(known.unwrap_or_else(|| track_from_audio_item(&audio_item)));
-                self.anchor_ms = 0;
-                self.anchor_at = Instant::now();
-                self.save_session();
-                // Spotify does not push our own changes; read what comes next.
-                self.refresh_queue(cx);
-                self.preload_next_started();
-                cx.emit(PlayerEvent::TrackChanged);
-                cx.notify();
+                // librespot reports the next track when it starts decoding
+                // it; the end of the old one is still queued for the speaker.
+                let wait = self.heard().map(|out| out.queued_ms()).unwrap_or(0);
+                if self.playing && wait > 20 {
+                    self.track_switch = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(wait as u64))
+                            .await;
+                        this.update(cx, |this, cx| this.track_changed(&audio_item, cx))
+                            .ok();
+                    }));
+                } else {
+                    self.track_switch = None;
+                    self.track_changed(&audio_item, cx);
+                }
             }
             EngineEvent::Playing { position_ms, .. } => {
-                self.loading = false;
-                self.playing = true;
-                self.anchor(position_ms);
+                self.anchor_reported(position_ms);
+                if self.heard().is_none() {
+                    self.loading = false;
+                    self.playing = true;
+                }
                 cx.emit(PlayerEvent::StateChanged);
                 cx.notify();
             }
@@ -1341,24 +1401,30 @@ impl Player {
                 let restored = self.warmup == Warmup::Restoring;
                 self.loading = false;
                 self.playing = false;
-                self.anchor(position_ms);
+                self.anchor_reported(position_ms);
                 if restored {
-                    // The restored track is loaded and buffered.
+                    // The restored track is loaded and buffered, and this
+                    // device holds the session: Play needs no transfer.
+                    self.mark_active();
                     self.restore = None;
                     self.finish_warmup(cx);
+                } else if std::mem::take(&mut self.play_when_ready) {
+                    // The restore arrived after its timeout, with Play pressed.
+                    self.loading = false;
+                    self.resume(cx);
                 }
                 self.save_session();
                 cx.emit(PlayerEvent::StateChanged);
                 cx.notify();
             }
             EngineEvent::Seeked { position_ms, .. } => {
-                self.anchor(position_ms);
+                self.anchor_reported(position_ms);
                 self.save_session();
                 cx.notify();
             }
             EngineEvent::PositionCorrection { position_ms, .. }
             | EngineEvent::PositionChanged { position_ms, .. } => {
-                self.anchor(position_ms);
+                self.anchor_reported(position_ms);
                 cx.notify();
             }
             EngineEvent::Stopped { .. } => {
@@ -1412,9 +1478,36 @@ impl Player {
         }
     }
 
+    /// A new track is current: the speaker is playing it (or will next).
+    fn track_changed(&mut self, audio_item: &AudioItem, cx: &mut Context<Self>) {
+        self.track_switch = None;
+        // Prefer what the Web API told us about this track (it has album and
+        // artist ids) over librespot's thinner metadata.
+        let known = self
+            .current
+            .iter()
+            .chain(self.queue.upcoming().take(5))
+            .find(|t| t.uri.as_ref() == audio_item.uri)
+            .cloned();
+        self.current = Some(known.unwrap_or_else(|| track_from_audio_item(audio_item)));
+        self.anchor(0);
+        self.save_session();
+        // Spotify does not push our own changes; read what comes next.
+        self.refresh_queue(cx);
+        self.preload_next_started();
+        cx.emit(PlayerEvent::TrackChanged);
+        cx.notify();
+    }
+
     /// Spotify's view of all devices, pushed on every change.
     fn on_cluster(&mut self, update: Cluster, cx: &mut Context<Self>) {
-        if update.active_device.as_deref() != self.device_id() {
+        // Another device took over. (None is not that: a paused session,
+        // like a restored one, is listed with no active device.)
+        if update
+            .active_device
+            .as_deref()
+            .is_some_and(|id| Some(id) != self.device_id())
+        {
             self.spirc_active = false;
         }
         self.devices = update.devices;
@@ -1521,6 +1614,39 @@ impl Player {
     fn anchor(&mut self, position_ms: u32) {
         self.anchor_ms = position_ms;
         self.anchor_at = Instant::now();
+        self.anchor_heard_ms = self.heard().map(|out| out.played_ms()).unwrap_or(0);
+    }
+
+    /// Anchor at a position librespot reported. librespot counts what it
+    /// has decoded; the speaker is behind it by what is still queued.
+    fn anchor_reported(&mut self, position_ms: u32) {
+        let queued = self.heard().map(|out| out.queued_ms()).unwrap_or(0);
+        self.anchor(position_ms.saturating_sub(queued));
+    }
+
+    /// The clock of the audio this device plays, while it plays here.
+    fn heard(&self) -> Option<&OutputControl> {
+        if self.remote_device().is_some() {
+            return None;
+        }
+        self.backend.as_ref()?.output()
+    }
+
+    /// The speaker started or stopped: the only thing that shows this device
+    /// as playing or paused.
+    fn on_cue(&mut self, cue: Cue, cx: &mut Context<Self>) {
+        if self.heard().is_none() {
+            return;
+        }
+        match cue {
+            Cue::Started => {
+                self.playing = true;
+                self.loading = false;
+            }
+            Cue::Stopped => self.playing = false,
+        }
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
     }
 
     /// Fill in the details of a track another device started.
