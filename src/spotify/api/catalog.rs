@@ -3,8 +3,9 @@
 use anyhow::Result;
 
 use super::super::enc;
-use super::{Api, is_unsupported};
+use super::{Api, is_unsupported, status_of};
 use crate::model::*;
+use crate::spotify::streaming;
 
 impl Api {
     pub async fn album(&self, id: &str) -> Result<Album> {
@@ -39,14 +40,27 @@ impl Api {
     }
 
     pub async fn playlist(&self, id: &str) -> Result<Playlist> {
-        self.get(&format!("/playlists/{id}")).await
+        match self.get(&format!("/playlists/{id}")).await {
+            Err(err) if !self.is_demo() && status_of(&err) == Some(403) => {
+                streaming::playlist(id).await
+            }
+            other => other,
+        }
     }
 
+    /// Lilac's app may only list the user's own playlists through the Web
+    /// API; others are read through the streaming session.
     pub async fn playlist_items(&self, id: &str, offset: u32) -> Result<Page<SavedItem>> {
         let query = format!("limit=100&offset={offset}&additional_types=track,episode");
-        match self.get(&format!("/playlists/{id}/items?{query}")).await {
-            Err(err) if is_unsupported(&err) => {
+        let result = match self.get(&format!("/playlists/{id}/items?{query}")).await {
+            Err(err) if status_of(&err) != Some(403) && is_unsupported(&err) => {
                 self.get(&format!("/playlists/{id}/tracks?{query}")).await
+            }
+            other => other,
+        };
+        match result {
+            Err(err) if !self.is_demo() && status_of(&err) == Some(403) => {
+                streaming::playlist_items(id, offset).await
             }
             other => other,
         }

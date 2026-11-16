@@ -5,6 +5,7 @@ pub mod buddylist;
 pub mod demo;
 pub mod lyrics;
 pub mod oauth;
+pub mod streaming;
 
 use std::sync::OnceLock;
 use std::time::Duration;

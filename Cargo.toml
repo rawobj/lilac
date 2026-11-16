@@ -22,6 +22,7 @@ rodio = { version = "0.21.1", default-features = false, features = ["playback"] 
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 librespot-connect = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-protocol = "0.8.0"
+protobuf = "3.7.2"
 librespot-metadata = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false }
 libc = "0.2"

@@ -181,6 +181,7 @@ impl Backend {
         .await
         .map_err(|e| anyhow!("could not start a streaming session: {e}"))?;
         tokio::spawn(task);
+        crate::spotify::streaming::set_session(Some(session.clone()));
 
         let (cluster_tx, cluster) = mpsc::unbounded_channel();
         let time = session.clone();
@@ -342,6 +343,7 @@ impl Backend {
     }
 
     pub fn shutdown(&self) {
+        crate::spotify::streaming::set_session(None);
         let _ = self.spirc.shutdown();
         self.session.shutdown();
     }
