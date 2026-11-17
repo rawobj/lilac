@@ -61,6 +61,11 @@ pub fn data_dir() -> PathBuf {
     base.join(APP_DIR)
 }
 
+/// Playlists opened before (see `playlist_cache`).
+pub fn playlist_cache_dir() -> PathBuf {
+    cache_dir().join("playlists")
+}
+
 pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.json")
 }

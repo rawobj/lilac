@@ -5,9 +5,8 @@
 //! which is never the case right after Lilac itself was closed.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use crate::model::{Images, ItemKind, Track};
+use crate::model::Track;
 
 /// Explicit track lists are kept for contexts without a URI (e.g. a search
 /// result); bounded so the file stays small.
@@ -62,7 +61,7 @@ impl LastSession {
     }
 
     pub fn with_track(mut self, track: &Track) -> Self {
-        self.track = (track.uri.as_ref() == self.track_uri).then(|| track_json(track));
+        self.track = (track.uri.as_ref() == self.track_uri).then(|| track.to_api_json());
         self
     }
 
@@ -88,47 +87,6 @@ impl LastSession {
     pub fn forget() {
         let _ = std::fs::remove_file(crate::paths::last_session_file());
     }
-}
-
-fn images_json(images: &Images) -> serde_json::Value {
-    let sized = [
-        (&images.small, 64),
-        (&images.medium, 300),
-        (&images.large, 640),
-    ];
-    sized
-        .into_iter()
-        .filter_map(|(url, width)| Some(json!({ "url": url.as_ref()?.as_ref(), "width": width })))
-        .collect()
-}
-
-/// Enough of a track for the player bar, readable by `Track`'s deserializer.
-fn track_json(track: &Track) -> serde_json::Value {
-    let artists: Vec<_> = track
-        .artists
-        .iter()
-        .map(|a| json!({ "id": a.id.as_ref(), "name": a.name.as_ref() }))
-        .collect();
-    json!({
-        "id": track.id.as_ref(),
-        "uri": track.uri.as_ref(),
-        "name": track.name.as_ref(),
-        "type": if track.kind == ItemKind::Episode { "episode" } else { "track" },
-        "duration_ms": track.duration_ms,
-        "explicit": track.explicit,
-        "artists": artists,
-        "album": track.album.as_ref().map(|a| json!({
-            "id": a.id.as_ref(),
-            "name": a.name.as_ref(),
-            "images": images_json(&a.images),
-        })),
-        "show": track.show.as_ref().map(|s| json!({
-            "id": s.id.as_ref(),
-            "name": s.name.as_ref(),
-            "images": images_json(&s.images),
-        })),
-        "images": images_json(&track.images),
-    })
 }
 
 /// Unix seconds of an RFC 3339 UTC timestamp as Spotify writes them

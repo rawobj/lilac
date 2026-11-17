@@ -13,6 +13,7 @@ use crate::menus::{self, TrackMenuContext};
 use crate::model::*;
 use crate::nav::Route;
 use crate::player::PlayerEvent;
+use crate::playlist_cache;
 use crate::runtime;
 use crate::theme;
 use crate::ui::track_row::{RowOptions, track_header, track_row};
@@ -27,6 +28,8 @@ pub enum Source {
 
 /// Rows above the tracks: hero, action bar, column header.
 const HEADER_ROWS: usize = 3;
+/// Spotify's own limit for a playlist; also bounds what is cached.
+const MAX_TRACKS: usize = 10_000;
 
 pub struct CollectionPage {
     source: Source,
@@ -37,6 +40,8 @@ pub struct CollectionPage {
     error: Option<SharedString>,
     list: ListState,
     generation: u64,
+    /// The playlist version the rows came from.
+    tracks_snapshot: Option<SharedString>,
 }
 
 impl CollectionPage {
@@ -73,6 +78,7 @@ impl CollectionPage {
             error: None,
             list: ListState::new(HEADER_ROWS, ListAlignment::Top, px(600.0)),
             generation: 0,
+            tracks_snapshot: None,
         };
         this.load(cx);
         this
@@ -138,90 +144,214 @@ impl CollectionPage {
                 })
                 .detach();
             }
-            Source::Playlist(id) => {
-                self.loading = self.tracks.is_empty();
-                // Show what the library already knows while the full object loads.
-                if self.playlist.is_none() {
-                    self.playlist = app::library(cx).read(cx).playlist(&id).cloned();
-                }
-                cx.spawn(async move |this, cx| {
-                    let (meta_api, meta_id) = (api.clone(), id.clone());
-                    let meta = runtime::run(async move { meta_api.playlist(&meta_id).await }).await;
-                    let alive = this
-                        .update(cx, |this, cx| {
-                            if this.generation != generation {
-                                return false;
-                            }
-                            match meta {
-                                Ok(playlist) => this.playlist = Some(playlist),
-                                Err(err) if this.playlist.is_none() => {
-                                    this.error = Some(format!("{err}").into());
-                                    this.loading = false;
-                                }
-                                Err(_) => {}
-                            }
-                            cx.notify();
-                            this.error.is_none()
-                        })
-                        .unwrap_or(false);
-                    if !alive {
-                        return;
-                    }
+            Source::Playlist(id) => self.load_playlist(id, api, generation, cx),
+        }
+    }
 
-                    // Page through the items; rows appear as each page lands.
-                    let mut offset = 0;
-                    loop {
-                        let (page_api, page_id) = (api.clone(), id.clone());
-                        let page =
-                            runtime::run(
-                                async move { page_api.playlist_items(&page_id, offset).await },
-                            )
-                            .await;
-                        let more = this
-                            .update(cx, |this, cx| {
-                                if this.generation != generation {
-                                    return false;
-                                }
-                                this.loading = false;
-                                let more = match page {
-                                    Ok(page) => {
-                                        let more = page.next.is_some() && !page.items.is_empty();
-                                        let tracks: Vec<Track> =
-                                            page.items.into_iter().filter_map(|i| i.item).collect();
-                                        if offset == 0 {
-                                            let scroll = this.list.logical_scroll_top();
-                                            this.set_tracks(tracks);
-                                            this.list.scroll_to(scroll);
-                                        } else {
-                                            // Keep a queue started from this playlist going past what had loaded.
-                                            let context = ContextUri::Playlist(id.clone());
-                                            let (start, more) = (this.tracks.len(), tracks.clone());
-                                            app::player(cx).update(cx, |player, cx| {
-                                                player.extend_context(&context, start, more, cx)
-                                            });
-                                            this.append_tracks(tracks);
-                                        }
-                                        more
-                                    }
-                                    Err(err) => {
-                                        if this.tracks.is_empty() {
-                                            this.error = Some(format!("{err}").into());
-                                        }
-                                        false
-                                    }
-                                };
-                                cx.notify();
-                                more
-                            })
-                            .unwrap_or(false);
-                        if !more {
-                            break;
-                        }
-                        offset += 100;
-                    }
+    /// Show a cached copy at once if there is one, then check Spotify behind
+    /// it and swap in what changed. Without a copy, rows appear page by page.
+    fn load_playlist(
+        &mut self,
+        id: SharedString,
+        api: crate::spotify::api::Api,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        // Show what the library already knows while the full object loads.
+        if self.playlist.is_none() {
+            self.playlist = app::library(cx).read(cx).playlist(&id).cloned();
+        }
+        let cacheable = !api.is_demo();
+        let shown = !self.tracks.is_empty();
+        self.loading = !shown;
+        cx.spawn(async move |this, cx| {
+            let cached = if cacheable && !shown {
+                let key = id.to_string();
+                runtime::run(async move {
+                    Ok(
+                        tokio::task::spawn_blocking(move || playlist_cache::load(&key))
+                            .await
+                            .ok()
+                            .flatten(),
+                    )
                 })
-                .detach();
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            let showing = this
+                .update(cx, |this, cx| {
+                    if let Some(cached) = &cached
+                        && this.generation == generation
+                    {
+                        this.playlist = Some(cached.playlist.clone());
+                        this.tracks_snapshot = cached.playlist.snapshot_id.clone();
+                        this.set_tracks(cached.tracks.clone());
+                        this.loading = false;
+                        cx.notify();
+                    }
+                    !this.tracks.is_empty()
+                })
+                .unwrap_or(false);
+
+            let (meta_api, meta_id) = (api.clone(), id.clone());
+            let meta = runtime::run(async move { meta_api.playlist(&meta_id).await }).await;
+            let unchanged = this
+                .update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return None;
+                    }
+                    let unchanged = match meta {
+                        Ok(playlist) => {
+                            // The snapshot id changes with every edit; the
+                            // streaming session's copies have none.
+                            let same = showing
+                                && playlist.snapshot_id.is_some()
+                                && playlist.snapshot_id == this.tracks_snapshot;
+                            this.playlist = Some(playlist);
+                            same
+                        }
+                        Err(err) if this.playlist.is_none() && !showing => {
+                            this.error = Some(format!("{err}").into());
+                            this.loading = false;
+                            cx.notify();
+                            return None;
+                        }
+                        Err(_) => false,
+                    };
+                    cx.notify();
+                    Some(unchanged)
+                })
+                .ok()
+                .flatten();
+            let Some(unchanged) = unchanged else { return };
+            if unchanged {
+                this.update(cx, |this, _| this.cache(cacheable)).ok();
+                return;
             }
+            if showing {
+                Self::refresh_playlist(this, id, api, generation, cacheable, cx).await;
+            } else {
+                Self::page_in_playlist(this, id, api, generation, cacheable, cx).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Keep what is shown as the cached copy of this playlist.
+    fn cache(&self, cacheable: bool) {
+        if let (true, Source::Playlist(id), Some(playlist)) =
+            (cacheable, &self.source, &self.playlist)
+        {
+            playlist_cache::store(id, playlist.clone(), self.tracks.clone());
+        }
+    }
+
+    /// Fetch the whole playlist quietly and replace the rows only if they
+    /// changed, keeping the scroll position.
+    async fn refresh_playlist(
+        this: WeakEntity<Self>,
+        id: SharedString,
+        api: crate::spotify::api::Api,
+        generation: u64,
+        cacheable: bool,
+        cx: &mut AsyncApp,
+    ) {
+        let mut tracks: Vec<Track> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let (page_api, page_id) = (api.clone(), id.clone());
+            let Ok(page) =
+                runtime::run(async move { page_api.playlist_items(&page_id, offset).await }).await
+            else {
+                // Keep showing the copy; it is still the best there is.
+                return;
+            };
+            let more = page.next.is_some() && !page.items.is_empty();
+            tracks.extend(page.items.into_iter().filter_map(|i| i.item));
+            if !more || tracks.len() >= MAX_TRACKS {
+                break;
+            }
+            offset += 100;
+        }
+        this.update(cx, |this, cx| {
+            if this.generation != generation {
+                return;
+            }
+            this.tracks_snapshot = this.playlist.as_ref().and_then(|p| p.snapshot_id.clone());
+            let changed = tracks.len() != this.tracks.len()
+                || tracks.iter().zip(&this.tracks).any(|(a, b)| a != b);
+            if changed {
+                let scroll = this.list.logical_scroll_top();
+                this.set_tracks(tracks);
+                this.list.scroll_to(scroll);
+            }
+            this.cache(cacheable);
+            cx.notify();
+        })
+        .ok();
+    }
+
+    /// First load: rows appear as each page lands.
+    async fn page_in_playlist(
+        this: WeakEntity<Self>,
+        id: SharedString,
+        api: crate::spotify::api::Api,
+        generation: u64,
+        cacheable: bool,
+        cx: &mut AsyncApp,
+    ) {
+        let mut offset = 0;
+        loop {
+            let (page_api, page_id) = (api.clone(), id.clone());
+            let page =
+                runtime::run(async move { page_api.playlist_items(&page_id, offset).await }).await;
+            let more = this
+                .update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return false;
+                    }
+                    this.loading = false;
+                    let more = match page {
+                        Ok(page) => {
+                            let more = page.next.is_some() && !page.items.is_empty();
+                            let tracks: Vec<Track> =
+                                page.items.into_iter().filter_map(|i| i.item).collect();
+                            if offset == 0 {
+                                this.tracks_snapshot =
+                                    this.playlist.as_ref().and_then(|p| p.snapshot_id.clone());
+                                this.set_tracks(tracks);
+                            } else {
+                                // Keep a queue started from this playlist going past what had loaded.
+                                let context = ContextUri::Playlist(id.clone());
+                                let (start, more) = (this.tracks.len(), tracks.clone());
+                                app::player(cx).update(cx, |player, cx| {
+                                    player.extend_context(&context, start, more, cx)
+                                });
+                                this.append_tracks(tracks);
+                            }
+                            if !more {
+                                this.cache(cacheable);
+                            }
+                            more
+                        }
+                        Err(err) => {
+                            if this.tracks.is_empty() {
+                                this.error = Some(format!("{err}").into());
+                            }
+                            false
+                        }
+                    };
+                    cx.notify();
+                    more && this.tracks.len() < MAX_TRACKS
+                })
+                .unwrap_or(false);
+            if !more {
+                break;
+            }
+            offset += 100;
         }
     }
 

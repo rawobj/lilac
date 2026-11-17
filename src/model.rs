@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use gpui_kit::SharedString;
 use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
 
 /// Artwork in up to three sizes. Spotify sends an array sorted large to small;
 /// we keep the URLs we actually render and drop the rest.
@@ -36,6 +37,17 @@ impl Images {
 
     pub fn is_empty(&self) -> bool {
         self.small.is_none() && self.medium.is_none() && self.large.is_none()
+    }
+
+    /// The Web API's shape, readable by the deserializer above.
+    pub fn to_api_json(&self) -> Value {
+        let sized = [(&self.small, 64), (&self.medium, 300), (&self.large, 640)];
+        sized
+            .into_iter()
+            .filter_map(|(url, width)| {
+                Some(json!({ "url": url.as_ref()?.as_ref(), "width": width }))
+            })
+            .collect()
     }
 }
 
@@ -164,6 +176,38 @@ pub struct Track {
 }
 
 impl Track {
+    /// The Web API's shape, readable by `Track`'s deserializer: enough for
+    /// rows and the player bar, for what Lilac keeps on disk.
+    pub fn to_api_json(&self) -> Value {
+        let artists: Vec<_> = self
+            .artists
+            .iter()
+            .map(|a| json!({ "id": a.id.as_ref(), "name": a.name.as_ref() }))
+            .collect();
+        json!({
+            "id": self.id.as_ref(),
+            "uri": self.uri.as_ref(),
+            "name": self.name.as_ref(),
+            "type": if self.kind == ItemKind::Episode { "episode" } else { "track" },
+            "duration_ms": self.duration_ms,
+            "explicit": self.explicit,
+            "is_local": self.is_local,
+            "is_playable": self.is_playable,
+            "artists": artists,
+            "album": self.album.as_ref().map(|a| json!({
+                "id": a.id.as_ref(),
+                "name": a.name.as_ref(),
+                "images": a.images.to_api_json(),
+            })),
+            "show": self.show.as_ref().map(|s| json!({
+                "id": s.id.as_ref(),
+                "name": s.name.as_ref(),
+                "images": s.images.to_api_json(),
+            })),
+            "images": self.images.to_api_json(),
+        })
+    }
+
     pub fn artist_line(&self) -> SharedString {
         if self.kind == ItemKind::Episode {
             return self
@@ -334,6 +378,25 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    /// The Web API's shape, readable by `Playlist`'s deserializer.
+    pub fn to_api_json(&self) -> Value {
+        json!({
+            "id": self.id.as_ref(),
+            "uri": self.uri.as_ref(),
+            "name": self.name.as_ref(),
+            "description": self.description.as_ref().map(|d| d.as_ref()),
+            "images": self.images.to_api_json(),
+            "owner": {
+                "id": self.owner.id.as_ref(),
+                "display_name": self.owner.display_name.as_ref().map(|d| d.as_ref()),
+            },
+            "snapshot_id": self.snapshot_id.as_ref().map(|s| s.as_ref()),
+            "collaborative": self.collaborative,
+            "public": self.public,
+            "items": { "total": self.total() },
+        })
+    }
+
     pub fn total(&self) -> u32 {
         self.items.as_ref().map(|p| p.total).unwrap_or(0)
     }

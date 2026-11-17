@@ -147,6 +147,7 @@ impl Session {
             self.streaming = streaming;
         } else {
             Credentials::forget_all();
+            crate::playlist_cache::clear();
             crate::disk_cache::clear();
             let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());
             runtime::spawn(async move {
