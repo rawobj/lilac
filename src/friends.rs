@@ -46,11 +46,27 @@ impl Friends {
         }
     }
 
+    /// Try again after a failure or a refusal (the Retry button).
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        self.status = Status::Loading;
+        cx.notify();
+        self.start(cx);
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 let api = cx.update(|cx| app::api(cx));
                 let result = runtime::run(async move { buddylist::fetch(&api).await }).await;
+                let connecting = result.as_ref().err().is_some_and(|e| {
+                    e.downcast_ref::<crate::spotify::streaming::NoSession>()
+                        .is_some()
+                });
+                if connecting {
+                    // Not refused, just early: ask again shortly.
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
+                    continue;
+                }
                 let unavailable = this
                     .update(cx, |this, cx| {
                         match result {

@@ -93,6 +93,15 @@ pub async fn fetch(api: &Api) -> Result<Vec<Friend>> {
     if api.is_demo() {
         return Ok(super::demo::friends());
     }
+    // As the desktop client asks: through the streaming session, whose
+    // login Spotify serves this to.
+    // When that is refused or not connected yet, Lilac's own login is
+    // tried; its answer tells a refusal (Unavailable) from an outage.
+    match super::streaming::buddylist().await {
+        Ok(body) => return parse(&body),
+        Err(err) if err.downcast_ref::<super::streaming::NoSession>().is_some() => return Err(err),
+        Err(_) => {}
+    }
     let token = api.auth.token().await?;
     let response = http()
         .get(URL)
@@ -105,7 +114,7 @@ pub async fn fetch(api: &Api) -> Result<Vec<Friend>> {
         bail!(Unavailable);
     }
     if !response.status().is_success() {
-        bail!("friend activity request failed with {status}");
+        bail!("Spotify answered with an error ({status})");
     }
     parse(&response.bytes().await?)
 }

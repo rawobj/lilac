@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::Result;
 use librespot_core::{Session, SpotifyUri};
 use librespot_metadata::{Metadata as _, Playlist as RawPlaylist, Track as RawTrack};
 use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
@@ -41,13 +41,40 @@ pub fn set_session(session: Option<Session>) {
     slot().send_replace(session);
 }
 
+/// The streaming session is not connected (yet); not a refusal.
+#[derive(Debug)]
+pub struct NoSession;
+
+impl std::fmt::Display for NoSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not connected to Spotify yet")
+    }
+}
+
+impl std::error::Error for NoSession {}
+
 async fn session() -> Result<Session> {
     let mut rx = slot().subscribe();
     let ready = tokio::time::timeout(SESSION_WAIT, rx.wait_for(|s| s.is_some()))
         .await
-        .context("the streaming session is not connected")?
-        .map_err(|_| anyhow!("the streaming session is not connected"))?;
+        .map_err(|_| anyhow::Error::new(NoSession))?
+        .map_err(|_| anyhow::Error::new(NoSession))?;
     Ok(ready.clone().expect("waited for Some"))
+}
+
+/// What the people you follow play, as the desktop client reads it.
+pub async fn buddylist() -> Result<Vec<u8>> {
+    let session = session().await?;
+    let bytes = session
+        .spclient()
+        .request_as_json(
+            &reqwest::Method::GET,
+            "/presence-view/v1/buddylist",
+            None,
+            None,
+        )
+        .await?;
+    Ok(bytes.to_vec())
 }
 
 /// Track lists of recently opened playlists, so each page is not a new
@@ -76,7 +103,6 @@ async fn raw_playlist(id: &str, fresh: bool) -> Result<Arc<RawPlaylist>> {
     cache.truncate(CACHED_PLAYLISTS);
     Ok(playlist)
 }
-
 /// A playlist's details, in the Web API's shape.
 pub async fn playlist(id: &str) -> Result<Playlist> {
     let raw = raw_playlist(id, true).await?;
@@ -129,7 +155,6 @@ pub async fn playlist_items(id: &str, offset: u32) -> Result<Page<SavedItem>> {
     });
     Ok(serde_json::from_value(value)?)
 }
-
 /// Track details for `uris` in one request (episodes and local files are
 /// left out; their rows stay empty).
 async fn tracks(uris: &[&SpotifyUri]) -> Result<Vec<Value>> {
@@ -177,6 +202,14 @@ async fn tracks(uris: &[&SpotifyUri]) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Spotify's own lyrics for a track (color-lyrics JSON).
+pub async fn lyrics(track_id: &str) -> Result<Value> {
+    let session = session().await?;
+    let id = librespot_core::SpotifyId::from_base62(track_id)?;
+    let bytes = session.spclient().get_lyrics(&id).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 fn image_url(file_id: &[u8]) -> String {
     let hex: String = file_id.iter().map(|b| format!("{b:02x}")).collect();
     format!("https://i.scdn.co/image/{hex}")
@@ -193,7 +226,10 @@ fn playable(track: &RawTrack) -> bool {
     let has_audio = !track.files.is_empty() || !track.alternatives.is_empty();
     let released = track.earliest_live_timestamp.as_timestamp_ms() <= now
         && (track.availability.is_empty()
-            || track.availability.iter().any(|a| a.start.as_timestamp_ms() <= now));
+            || track
+                .availability
+                .iter()
+                .any(|a| a.start.as_timestamp_ms() <= now));
     has_audio && released
 }
 

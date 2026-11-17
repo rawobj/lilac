@@ -593,11 +593,19 @@ impl RightPanelView {
         };
         match status {
             Status::Loading if list.is_empty() => panel.child(ui::loading_state()),
-            Status::Unavailable => panel.child(empty(
-                "Friend activity unavailable",
-                "Spotify only shares it with its own apps for this account.".into(),
-            )),
-            Status::Failed(err) => panel.child(empty("Couldn't load friend activity", err)),
+            Status::Unavailable => panel.child(
+                empty(
+                    "Friend activity unavailable",
+                    "Spotify didn't share it with Lilac this time. It usually works once \
+                     Lilac is fully connected."
+                        .into(),
+                )
+                .child(div().flex().justify_center().child(retry_friends())),
+            ),
+            Status::Failed(err) => panel.child(
+                empty("Couldn't load friend activity", err)
+                    .child(div().flex().justify_center().child(retry_friends())),
+            ),
             _ if list.is_empty() => panel.child(empty(
                 "No friend activity yet",
                 "Follow friends on Spotify to see what they play.".into(),
@@ -819,4 +827,9 @@ impl Render for RightPanelView {
             RightPanel::Friends => self.friends(window, cx),
         }
     }
+}
+
+fn retry_friends() -> Stateful<Div> {
+    ui::pill_button("friends-retry", "Try again", false)
+        .on_click(|_, _, cx| app::friends(cx).update(cx, |f, cx| f.retry(cx)))
 }

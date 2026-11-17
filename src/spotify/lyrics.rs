@@ -227,20 +227,12 @@ struct SpotifyLine {
 }
 
 async fn from_spotify(auth: &Auth, track: &Track) -> Result<Lyrics> {
-    let token = auth.token().await?;
-    let url = format!(
-        "{SPCLIENT}/color-lyrics/v2/track/{}?format=json&vocalRemoval=false",
-        track.id
-    );
-    let response = http()
-        .get(url)
-        .bearer_auth(token)
-        .header("app-platform", "WebPlayer")
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .error_for_status()?;
-    let parsed: ColorLyrics = response.json().await?;
+    // Through the streaming session, which Spotify answers; Lilac's own
+    // Web API token is often refused here.
+    let parsed: ColorLyrics = match super::streaming::lyrics(&track.id).await {
+        Ok(value) => serde_json::from_value(value)?,
+        Err(_) => from_spotify_web(auth, track).await?,
+    };
     let synced = parsed.lyrics.sync_type == "LINE_SYNCED";
     let romanized = romanization(&parsed.lyrics.alternatives, parsed.lyrics.lines.len());
     let lines: Vec<LyricLine> = parsed
@@ -290,6 +282,23 @@ fn romanization(alternatives: &[Value], count: usize) -> Option<Arc<[SharedStrin
             .all(|l| l.chars().all(|c| c.is_ascii() || !c.is_alphabetic()));
         (lines.len() == count && (language.ends_with("Latn") || latin)).then(|| lines.into())
     })
+}
+
+async fn from_spotify_web(auth: &Auth, track: &Track) -> Result<ColorLyrics> {
+    let token = auth.token().await?;
+    let url = format!(
+        "{SPCLIENT}/color-lyrics/v2/track/{}?format=json&vocalRemoval=false",
+        track.id
+    );
+    let response = http()
+        .get(url)
+        .bearer_auth(token)
+        .header("app-platform", "WebPlayer")
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.json().await?)
 }
 
 #[derive(Deserialize)]
