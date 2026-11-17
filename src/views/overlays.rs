@@ -283,12 +283,19 @@ pub fn dialog(
             "About Lilac",
             div()
                 .flex()
-                .flex_col()
-                .gap_2()
-                .text_color(theme::text_muted())
-                .child(concat!("Version ", env!("CARGO_PKG_VERSION")))
-                .child("A native Spotify client written in Rust with GPUI.")
-                .child("Not affiliated with or endorsed by Spotify AB.")
+                .items_center()
+                .gap_4()
+                .child(img(crate::assets::APP_ICON).flex_none().size(px(72.0)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .text_color(theme::text_muted())
+                        .child(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                        .child("A native Spotify client written in Rust with GPUI.")
+                        .child("Not affiliated with or endorsed by Spotify AB."),
+                )
                 .into_any_element(),
             None,
         ),

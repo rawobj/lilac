@@ -5,7 +5,7 @@ use gpui_kit::*;
 use crate::app;
 use crate::session::Status;
 use crate::theme;
-use crate::ui::{self, icons};
+use crate::ui;
 
 pub struct LoginView;
 
@@ -100,25 +100,7 @@ impl Render for LoginView {
                     .items_center()
                     .gap_6()
                     .occlude()
-                    .child(
-                        div()
-                            .size(px(72.0))
-                            .rounded(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(linear_gradient(
-                                150.0,
-                                linear_color_stop(theme::accent_soft(), 0.0),
-                                linear_color_stop(theme::accent_strong(), 1.0),
-                            ))
-                            .child(
-                                svg()
-                                    .path(icons::LILAC)
-                                    .size(px(36.0))
-                                    .text_color(theme::backdrop_opaque()),
-                            ),
-                    )
+                    .child(img(crate::assets::APP_ICON).size(px(88.0)))
                     .child(
                         div()
                             .flex()

@@ -1,10 +1,10 @@
 //! The loading screen shown while the player warms up after login.
 //!
 //! It stays until the song Lilac was left on is in the player bar, which is
-//! usually as soon as the opening animation has played: the track is read
-//! from disk at launch. Loading it into the streaming session and buffering
-//! it carries on underneath (see `Player::restore_session`); a Play pressed
-//! before that is done starts the song when it is.
+//! usually as soon as the bloom has played: the track is read from disk at
+//! launch. Loading it into the streaming session and buffering it carries
+//! on underneath (see `Player::restore_session`); a Play pressed before that
+//! is done starts the song when it is.
 
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
@@ -17,19 +17,37 @@ use crate::player::Warmup;
 use crate::theme;
 use crate::ui::icons;
 
-/// Long enough for the opening animation to finish.
+/// Long enough for the bloom to finish.
 const MIN_SHOWN: Duration = Duration::from_millis(1100);
 /// Never longer than this, whatever the network does.
 const MAX_SHOWN: Duration = Duration::from_millis(4000);
 const FADE: Duration = Duration::from_millis(280);
-/// The badge pops in, then its petals turn into place.
-const POP: Duration = Duration::from_millis(520);
-const UNFOLD: Duration = Duration::from_millis(900);
+/// The bloom: stem first, then florets from the bottom up.
+const BLOOM_START: f32 = 0.12;
+const BLOOM_STAGGER: f32 = 0.045;
+const BLOOM_GROW: f32 = 0.42;
 /// Animations do not need the display's full refresh rate.
 const FPS: f32 = 60.0;
 
-/// Edge of the app badge, in pixels.
-const BADGE: f32 = 112.0;
+/// Edge of the sprig drawing, in pixels.
+const SPRIG: f32 = 220.0;
+/// Florets of the app icon in its 1024 frame: x, y, radius (top to bottom).
+const FLORETS: [(f32, f32, f32); 14] = [
+    (497.0, 205.0, 44.0),
+    (430.0, 272.0, 66.0),
+    (548.0, 262.0, 64.0),
+    (372.0, 352.0, 64.0),
+    (478.0, 348.0, 70.0),
+    (588.0, 344.0, 64.0),
+    (402.0, 440.0, 62.0),
+    (508.0, 434.0, 66.0),
+    (614.0, 430.0, 58.0),
+    (448.0, 520.0, 58.0),
+    (556.0, 516.0, 60.0),
+    (484.0, 596.0, 52.0),
+    (580.0, 590.0, 50.0),
+    (536.0, 664.0, 44.0),
+];
 
 pub enum SplashEvent {
     Done,
@@ -156,39 +174,89 @@ fn ease_out_back(t: f32) -> f32 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
-fn badge() -> impl IntoElement {
-    div()
-        .size(px(BADGE))
-        .rounded(px(BADGE * 0.3))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(linear_gradient(
-            150.0,
-            linear_color_stop(theme::accent_soft(), 0.0),
-            linear_color_stop(theme::accent_strong(), 1.0),
-        ))
-        .with_animation("pop", Animation::new(POP).with_max_fps(FPS), |el, t| {
-            let s = ease_out_back(t);
-            el.size(px(BADGE * s.max(0.0)))
-                .rounded(px(BADGE * 0.3 * s.max(0.0)))
-                .opacity(t.min(1.0))
-        })
-        .child(
-            svg()
-                .path(icons::LILAC)
-                .size(px(BADGE * 0.5))
-                .text_color(theme::backdrop_opaque())
-                .with_animation(
-                    "unfold",
-                    Animation::new(UNFOLD).with_max_fps(FPS),
-                    |el, t| {
-                        // Petals turn a quarter round into place.
-                        let turn = (1.0 - ease_out_back(t)) * TAU / 4.0;
-                        el.with_transformation(Transformation::rotate(radians(turn)))
-                    },
+fn sprig() -> impl IntoElement {
+    let k = SPRIG / 1024.0;
+    let tints = [
+        theme::white(1.0),
+        theme::accent_soft(),
+        rgba8_hsla(0xe9ddff),
+    ];
+    let mut sprig = div().relative().size(px(SPRIG)).child(
+        svg()
+            .absolute()
+            .size(px(SPRIG))
+            .path(icons::LILAC_STEM)
+            .text_color(theme::accent_soft())
+            .with_animation(
+                "stem",
+                Animation::new(Duration::from_millis(300)).with_easing(ease_in_out),
+                |stem, t| stem.opacity(t),
+            ),
+    );
+    // Bloom from the bottom up.
+    let order: Vec<usize> = (0..FLORETS.len()).rev().collect();
+    let total = BLOOM_START + BLOOM_STAGGER * FLORETS.len() as f32 + BLOOM_GROW;
+    for (rank, &ix) in order.iter().enumerate() {
+        let (x, y, r) = FLORETS[ix];
+        let (x, y, r) = (x * k, y * k, r * k);
+        let delay = BLOOM_START + BLOOM_STAGGER * rank as f32;
+        let tint = tints[ix % tints.len()];
+        let turn = ix as f32 * 0.7;
+        let phase = ix as f32 * 0.13;
+        let flower = svg()
+            .path(icons::LILAC_FLORET)
+            .text_color(tint)
+            .with_transformation(Transformation::rotate(radians(turn)));
+        sprig = sprig.child(
+            div()
+                .absolute()
+                .left(px(x - r))
+                .top(px(y - r))
+                .size(px(2.0 * r))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .with_animation(
+                            ("bloom", ix),
+                            Animation::new(Duration::from_secs_f32(total)).with_max_fps(FPS),
+                            move |el, t| {
+                                let local = ((t * total - delay) / BLOOM_GROW).clamp(0.0, 1.0);
+                                let grow = if local == 0.0 {
+                                    0.0
+                                } else {
+                                    ease_out_back(local)
+                                };
+                                el.size(px(2.0 * r * grow.max(0.0))).opacity(local.min(1.0))
+                            },
+                        )
+                        .child(
+                            flower.size_full().with_animation(
+                                ("breathe", ix),
+                                Animation::new(Duration::from_millis(2800))
+                                    .repeat()
+                                    .with_max_fps(FPS),
+                                move |el, t| {
+                                    let s = 1.0 + 0.06 * (TAU * (t + phase)).sin();
+                                    el.with_transformation(
+                                        Transformation::rotate(radians(turn))
+                                            .with_scaling(size(s, s)),
+                                    )
+                                },
+                            ),
+                        ),
                 ),
-        )
+        );
+    }
+    sprig
+}
+
+fn rgba8_hsla(hex: u32) -> Hsla {
+    theme::rgba8(hex, 1.0).into()
 }
 
 impl Render for Splash {
@@ -211,15 +279,15 @@ impl Render for Splash {
             .child(
                 div()
                     .relative()
-                    .size(px(BADGE + 160.0))
+                    .size(px(SPRIG + 120.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    // A soft glow that breathes behind the badge.
+                    // A soft glow that breathes behind the flower.
                     .child(
                         div()
                             .absolute()
-                            .size(px(BADGE * 1.1))
+                            .size(px(SPRIG * 0.9))
                             .rounded_full()
                             .bg(theme::accent_alpha(0.10))
                             .with_animation(
@@ -239,7 +307,7 @@ impl Render for Splash {
                                 },
                             ),
                     )
-                    .child(badge()),
+                    .child(sprig()),
             )
             .child(
                 div()

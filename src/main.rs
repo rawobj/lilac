@@ -89,14 +89,14 @@ fn main() {
 }
 
 /// Our audio goes out through ALSA, which PipeWire otherwise lists as
-/// "PipeWire ALSA [lilac]" in the desktop's volume mixer.
+/// "PipeWire ALSA [lilac]" with no icon in the desktop's volume mixer.
 #[cfg(target_os = "linux")]
 fn name_audio_stream() {
     if std::env::var_os("PIPEWIRE_ALSA").is_none() {
         // The process id lets `system_volume` recognise its own stream; the
         // ALSA plugin does not set it.
         let props = format!(
-            r#"{{ application.name = "Lilac" node.description = "Lilac" media.name = "Lilac" media.role = "Music" application.process.id = "{}" }}"#,
+            r#"{{ application.name = "Lilac" application.icon-name = "lilac" node.description = "Lilac" media.name = "Lilac" media.role = "Music" application.process.id = "{}" }}"#,
             std::process::id()
         );
         // SAFETY: first thing in main, before any other thread exists.

@@ -39,7 +39,8 @@ icons![
     "keyboard",
     "laptop",
     "library",
-    "lilac",
+    "lilac-floret",
+    "lilac-stem",
     "link",
     "list-end",
     "list-music",
@@ -81,12 +82,21 @@ icons![
     "x",
 ];
 
+/// The app icon in color, for places that show the app itself (loading
+/// screen, login, About); `icons/lilac-floret.svg` and `icons/lilac-stem.svg`
+/// are its parts, for the loading screen's bloom.
+pub const APP_ICON: &str = "app/lilac.svg";
+const APP_ICON_SVG: &[u8] = include_bytes!("../assets/app/lilac.svg");
+
 /// Asset source for the application. Falls back to the component library's
 /// bundled icons so its built-in widgets keep working.
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_ICON {
+            return Ok(Some(Cow::Borrowed(APP_ICON_SVG)));
+        }
         if let Some((_, data)) = ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(data)));
         }

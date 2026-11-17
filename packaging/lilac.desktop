@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lilac
+GenericName=Music Player
+Comment=A fast, native Spotify player
+Exec=lilac %U
+Icon=lilac
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=lilac
+Keywords=spotify;music;player;
