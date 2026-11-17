@@ -38,8 +38,16 @@ const RESTORE_TIMEOUT: Duration = Duration::from_millis(4500);
 /// Bursts are collapsed: the first change goes out at once, the last one
 /// after this much quiet.
 const COMMAND_SETTLE: Duration = Duration::from_millis(400);
-/// Resting the pointer on a track this long starts fetching it.
-const HOVER_PRELOAD: Duration = Duration::from_millis(150);
+/// How often a track that failed to load is asked for again, and the wait
+/// first. Spotify limits how many decryption keys an account may fetch in a
+/// burst; more retries would only add to the burst.
+const UNAVAILABLE_RETRIES: u32 = 1;
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
+/// librespot skips to the next track when one fails to load. When Spotify
+/// refuses every key, that walks through the whole context, each step
+/// asking for another key and prolonging the refusal; this many failures in
+/// a row stop it.
+const MAX_FAILED_IN_ROW: u32 = 3;
 /// Volume reports from Spotify this soon after a local change are echoes of
 /// older steps and would make the slider jump back.
 const VOLUME_ECHO: Duration = Duration::from_millis(1500);
@@ -95,6 +103,16 @@ pub struct Player {
     /// A track change librespot reported before the old track's queued end
     /// was heard; applied when it is.
     track_switch: Option<Task<()>>,
+    /// The track librespot is loading to play (not a preload).
+    loading_uri: Option<String>,
+    /// A track that failed to load and how often it was asked for again.
+    retried: Option<(String, u32)>,
+    retry: Option<Task<()>>,
+    /// Tracks that failed to load since one last loaded.
+    failed_in_row: u32,
+    /// Playback was stopped after `MAX_FAILED_IN_ROW` failures; librespot
+    /// ignores Play until a track is loaded again.
+    halted: bool,
     ticker: Option<Task<()>>,
     backend: Option<Backend>,
     /// The streaming session is being set up.
@@ -115,7 +133,6 @@ pub struct Player {
     /// A seek waiting for the previous one to settle, and the timer for it.
     pending_seek: Option<u32>,
     seek_settle: Option<Task<()>>,
-    hover_preload: Option<Task<()>>,
     pub warmup: Warmup,
     restore: Option<Task<()>>,
     /// Play was pressed while the last session was still on its way here.
@@ -127,8 +144,8 @@ pub struct Player {
         )>,
     >,
     queue_refresh: Option<Task<()>>,
-    /// Track URIs of the context we started, in order, to find the next
-    /// track without waiting for the Web API (which lags by seconds).
+    /// Track URIs of the list we started when it has no context URI, in
+    /// order: kept with the session and used to load a track again.
     started_tracks: Vec<String>,
     /// librespot itself is the active device in this session. Spotify's
     /// device list may still name us active from an earlier run, and
@@ -214,6 +231,11 @@ impl Player {
             anchor_at: Instant::now(),
             anchor_heard_ms: 0,
             track_switch: None,
+            loading_uri: None,
+            retried: None,
+            retry: None,
+            failed_in_row: 0,
+            halted: false,
             ticker: None,
             backend: None,
             starting: None,
@@ -228,7 +250,6 @@ impl Player {
             volume_changed_at: None,
             pending_seek: None,
             seek_settle: None,
-            hover_preload: None,
             warmup: Warmup::Idle,
             restore: None,
             play_when_ready: false,
@@ -453,11 +474,6 @@ impl Player {
     fn restore_session(&mut self, cx: &mut Context<Self>) {
         self.warmup = Warmup::Restoring;
         cx.notify();
-        // Fetching the saved track needs no activation, which takes
-        // librespot a couple of seconds after connecting; overlap the two.
-        if let (Some(backend), Some(saved)) = (self.backend(), LastSession::load()) {
-            backend.preload(&saved.track_uri);
-        }
         let lookup = self.restore_lookup.take();
         self.restore = Some(cx.spawn(async move |this, cx| {
             let (state, last) = match lookup {
@@ -523,6 +539,11 @@ impl Player {
                 return false;
             }
             // Another device holds a paused session: bring it here, paused.
+            // Fetching the track needs no activation, which takes librespot
+            // a couple of seconds after connecting; overlap the two.
+            if let (Some(backend), Some(item)) = (self.backend(), &state.item) {
+                backend.preload(&item.uri);
+            }
             if self.backend().is_some_and(|b| b.restore_paused().is_ok()) {
                 self.current = state.item;
                 self.playing = false;
@@ -565,6 +586,7 @@ impl Player {
         let Some(backend) = self.backend() else {
             return false;
         };
+        backend.preload(&session.track_uri);
         if backend
             .load(
                 session.context_uri.as_deref(),
@@ -636,17 +658,6 @@ impl Player {
         .detach();
     }
 
-    /// Start fetching a track right away, e.g. on the first click of a
-    /// double click, before the user has committed to playing it.
-    pub fn prefetch_track(&mut self, uri: &str) {
-        self.prepare_to_play();
-        if self.remote_device().is_none()
-            && let Some(backend) = self.backend()
-        {
-            backend.preload(uri);
-        }
-    }
-
     /// The user is about to play something here (a play button or a track
     /// is being pressed). Becoming the active device costs a round trip to
     /// Spotify that librespot must finish before it loads anything, so it is
@@ -663,26 +674,6 @@ impl Player {
             // finds the device active.
             self.spirc_active = true;
         }
-    }
-
-    /// The pointer rests on a track row (or left it, with `None`). A track
-    /// takes several sequential round trips to start; fetching it while the
-    /// user is still deciding hides most of them.
-    pub fn hover_track(&mut self, uri: Option<SharedString>, cx: &mut Context<Self>) {
-        self.hover_preload = None;
-        let Some(uri) = uri else { return };
-        if self.backend().is_none() || self.remote_device().is_some() {
-            return;
-        }
-        self.hover_preload = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(HOVER_PRELOAD).await;
-            this.update(cx, |this, _| {
-                if let Some(backend) = this.backend() {
-                    backend.preload(&uri);
-                }
-            })
-            .ok();
-        }));
     }
 
     /// More tracks of `context` arrived, e.g. the next page of a long playlist.
@@ -775,6 +766,13 @@ impl Player {
             cx.notify();
             return;
         }
+        if self.halted
+            && self.remote_device().is_none()
+            && let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string())
+        {
+            self.play_again(uri, cx);
+            return;
+        }
         if self.heard().is_some() {
             // Playing once the speaker is (`on_cue`); loading until then.
             self.loading = true;
@@ -836,6 +834,7 @@ impl Player {
     }
 
     pub fn next(&mut self, cx: &mut Context<Self>) {
+        self.retry = None;
         if self.simulated(cx) {
             // An explicit skip leaves "repeat one" for the next track, like the official clients.
             let repeat = if self.repeat == Repeat::Track {
@@ -856,6 +855,7 @@ impl Player {
     }
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
+        self.retry = None;
         if !self.simulated(cx) {
             // Spotify restarts the track or goes back itself, by the same rule.
             if self.remote_device().is_some() {
@@ -1205,8 +1205,11 @@ impl Player {
 
     fn load(&mut self, load: PendingLoad, cx: &mut Context<Self>) {
         // What plays next is decided anew; a switch still waiting for the
-        // old queue to be heard is moot.
+        // old queue to be heard, or a retry of a failed track, is moot.
         self.track_switch = None;
+        self.retry = None;
+        self.halted = false;
+        self.failed_in_row = 0;
         // Quality, normalisation and gapless are fixed per librespot player.
         let options = Options::from_settings(app::settings(cx).read(cx));
         if self
@@ -1389,6 +1392,7 @@ impl Player {
                 }
             }
             EngineEvent::Playing { position_ms, .. } => {
+                self.failed_in_row = 0;
                 self.anchor_reported(position_ms);
                 if self.heard().is_none() {
                     self.loading = false;
@@ -1399,6 +1403,7 @@ impl Player {
             }
             EngineEvent::Paused { position_ms, .. } => {
                 let restored = self.warmup == Warmup::Restoring;
+                self.failed_in_row = 0;
                 self.loading = false;
                 self.playing = false;
                 self.anchor_reported(position_ms);
@@ -1433,14 +1438,62 @@ impl Player {
                 cx.emit(PlayerEvent::StateChanged);
                 cx.notify();
             }
-            EngineEvent::Unavailable { .. } => {
+            EngineEvent::Loading { .. } if self.halted => {
+                // Spirc's skip past the last failure can arrive after the
+                // stop; stop it too.
+                if let Some(backend) = self.backend() {
+                    backend.stop();
+                }
+            }
+            EngineEvent::Loading { track_id, .. } => {
+                self.loading_uri = track_id.to_uri().ok();
+            }
+            EngineEvent::Unavailable { track_id, .. } => {
+                // librespot reports a failed preload of the upcoming track
+                // the same way; Spotify skips that one when it comes up, and
+                // what plays now is fine. Only a track asked to play is news.
+                let uri = track_id.to_uri().unwrap_or_default();
+                if self.loading_uri.as_deref() != Some(uri.as_str()) {
+                    return;
+                }
+                self.loading_uri = None;
+                self.failed_in_row += 1;
+                if self.failed_in_row >= MAX_FAILED_IN_ROW {
+                    self.halt(cx);
+                    return;
+                }
+                let attempts = match &self.retried {
+                    Some((last, n)) if *last == uri => *n,
+                    _ => 0,
+                };
+                // A paused load (a restored session) is not retried: the retry
+                // would start playing what nobody asked to hear.
+                let wanted = self.loading || self.play_when_ready;
+                if wanted && attempts < UNAVAILABLE_RETRIES {
+                    // Spotify refuses a track's decryption key now and then
+                    // and librespot gives up on the first refusal; asking
+                    // again usually works.
+                    self.retried = Some((uri.clone(), attempts + 1));
+                    self.retry = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(RETRY_DELAY * (attempts + 1))
+                            .await;
+                        this.update(cx, |this, cx| this.play_again(uri, cx)).ok();
+                    }));
+                    return;
+                }
+                self.retried = None;
                 let name = self
                     .current
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default();
+                    .iter()
+                    .chain(self.queue.current())
+                    .chain(self.queue.user.iter())
+                    .chain(self.queue.upcoming())
+                    .find(|t| t.uri.as_ref() == uri)
+                    .map(|t| format!("\u{201c}{}\u{201d}", t.name))
+                    .unwrap_or_else(|| "A track".into());
                 // Spotify moves on to the next track by itself.
-                app::toast_error(format!("\u{201c}{name}\u{201d} isn't available"), cx);
+                app::toast_error(format!("{name} isn't available, skipping it"), cx);
             }
             EngineEvent::ShuffleChanged { shuffle } => {
                 self.connect_shuffle = shuffle;
@@ -1478,9 +1531,69 @@ impl Player {
         }
     }
 
+    /// Stop librespot from skipping on through tracks that will not load.
+    fn halt(&mut self, cx: &mut Context<Self>) {
+        if let Some(backend) = self.backend() {
+            backend.stop();
+        }
+        self.halted = true;
+        self.failed_in_row = 0;
+        self.retried = None;
+        self.retry = None;
+        self.loading = false;
+        self.playing = false;
+        self.play_when_ready = false;
+        app::toast_error(
+            "Spotify isn't handing out audio right now. Try again in a few minutes.",
+            cx,
+        );
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
+    }
+
+    /// Load `uri` again in the context it failed in (librespot has moved on
+    /// to the next track by now).
+    fn play_again(&mut self, uri: String, cx: &mut Context<Self>) {
+        self.retry = None;
+        if self.remote_device().is_some() {
+            return;
+        }
+        let load = match &self.connect_context {
+            Some(context) => PendingLoad {
+                context: Some(context.clone()),
+                tracks: Vec::new(),
+                start: Start::Uri(uri),
+            },
+            None => match self.started_tracks.iter().position(|t| *t == uri) {
+                Some(ix) => PendingLoad {
+                    context: None,
+                    tracks: self.started_tracks.clone(),
+                    start: Start::Index(ix as u32),
+                },
+                None => PendingLoad {
+                    context: None,
+                    tracks: vec![uri],
+                    start: Start::Index(0),
+                },
+            },
+        };
+        self.loading = true;
+        self.load(load, cx);
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
+    }
+
     /// A new track is current: the speaker is playing it (or will next).
     fn track_changed(&mut self, audio_item: &AudioItem, cx: &mut Context<Self>) {
         self.track_switch = None;
+        // It loaded after all; a later failure of it starts counting anew.
+        if self
+            .retried
+            .as_ref()
+            .is_some_and(|(uri, _)| *uri == audio_item.uri)
+        {
+            self.retried = None;
+        }
         // Prefer what the Web API told us about this track (it has album and
         // artist ids) over librespot's thinner metadata.
         let known = self
@@ -1494,7 +1607,6 @@ impl Player {
         self.save_session();
         // Spotify does not push our own changes; read what comes next.
         self.refresh_queue(cx);
-        self.preload_next_started();
         cx.emit(PlayerEvent::TrackChanged);
         cx.notify();
     }
@@ -1711,26 +1823,6 @@ impl Player {
         }));
     }
 
-    /// In the context we started ourselves the next track is known at once.
-    /// Shuffle and queued tracks change the order, so then the Web API's
-    /// queue decides (see `apply_remote_queue`).
-    fn preload_next_started(&self) {
-        if self.connect_shuffle || self.remote_device().is_some() {
-            return;
-        }
-        let Some(current) = &self.current else { return };
-        let Some(ix) = self
-            .started_tracks
-            .iter()
-            .position(|u| *u == current.uri.as_ref())
-        else {
-            return;
-        };
-        if let (Some(backend), Some(next)) = (self.backend(), self.started_tracks.get(ix + 1)) {
-            backend.preload(next);
-        }
-    }
-
     fn apply_remote_queue(&mut self, remote: crate::model::RemoteQueue, cx: &mut Context<Self>) {
         // librespot's metadata has no album or artist ids; the Web API's has,
         // which the title and artist links and the Now Playing panel need.
@@ -1740,14 +1832,6 @@ impl Player {
         {
             self.current = Some(full.clone());
             cx.emit(PlayerEvent::TrackChanged);
-        }
-        // Fetch the start of the next track now, so Next and the change at
-        // the end of this one do not wait on the network.
-        if self.remote_device().is_none()
-            && let (Some(backend), Some(next)) = (self.backend(), remote.queue.first())
-            && next.playable()
-        {
-            backend.preload(&next.uri);
         }
         self.queue = Queue::mirror(remote.currently_playing, remote.queue);
         cx.notify();

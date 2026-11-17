@@ -273,6 +273,11 @@ impl Backend {
         }
     }
 
+    /// Stop the engine, dropping a load in progress; Spirc sees it stopped.
+    pub fn stop(&self) {
+        self.engine.stop();
+    }
+
     /// Become the active Connect device without playing anything yet.
     pub fn activate(&self) -> Result<()> {
         self.spirc.activate().map_err(spirc_error)
