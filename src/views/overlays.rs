@@ -312,6 +312,11 @@ pub fn dialog(
             }
             ("Keyboard shortcuts", grid.into_any_element(), None)
         }
+        Dialog::ArtistAbout { id } => (
+            "About the artist",
+            super::artist_about::render(&id, cx),
+            None,
+        ),
         Dialog::SoloistSetup => super::soloist_setup::render(soloist_key, cx),
         Dialog::SoloistExpired => {
             let soloist = app::soloist(cx).read(cx);
@@ -380,10 +385,20 @@ pub fn dialog(
 
     let has_confirm = confirm.is_some();
     let shown = app::ui(cx).read(cx).dialog.clone();
-    let wide = matches!(shown, Some(Dialog::SoloistSetup));
+    let wide = matches!(
+        shown,
+        Some(Dialog::SoloistSetup | Dialog::ArtistAbout { .. })
+    );
+    let roomy = matches!(shown, Some(Dialog::ArtistAbout { .. }));
     let panel = theme::popup()
         .id("dialog")
-        .w(px(if wide { 500.0 } else { 440.0 }))
+        .w(px(if roomy {
+            640.0
+        } else if wide {
+            500.0
+        } else {
+            440.0
+        }))
         .max_h(px(if wide { 760.0 } else { 560.0 }))
         .overflow_y_scroll()
         .restrict_scroll_to_axis()

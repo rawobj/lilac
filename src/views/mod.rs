@@ -1,5 +1,6 @@
 //! The window's root view: lays out the panels and hosts overlays.
 
+mod artist_about;
 mod login;
 mod overlays;
 mod player_bar;

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use librespot_core::{Session, SpotifyUri};
 use librespot_metadata::{
-    Album as RawAlbum, Metadata as _, Playlist as RawPlaylist, Track as RawTrack,
+    Album as RawAlbum, Artist as RawArtist, Metadata as _, Playlist as RawPlaylist,
+    Track as RawTrack,
 };
 use librespot_protocol::extended_metadata::{
     BatchedEntityRequest, BatchedExtensionResponse, EntityRequest, ExtensionQuery,
@@ -24,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::disk_cache;
-use crate::model::{Album, Page, Playlist, SavedItem, Track};
+use crate::model::{Album, Artist, Page, Playlist, SavedItem, Track};
 
 /// Matches the Web API's page size for playlist items.
 const PAGE: usize = 100;
@@ -88,6 +89,258 @@ async fn session() -> Result<Session> {
         .map_err(|_| anyhow::Error::new(NoSession))?
         .map_err(|_| anyhow::Error::new(NoSession))?;
     Ok(ready.clone().expect("waited for Some"))
+}
+
+/// The persisted query Spotify's web player sends for an artist's page.
+/// Spotify changes it with web player releases; a stale one is answered
+/// with an error, which callers show as "unavailable".
+const ARTIST_OVERVIEW_HASH: &str =
+    "9f8134ef565e78621f1e1793555bd6633c5ac144ae0f89604ed3ae3f80b3c8e6";
+
+/// What the official apps show about an artist beyond the catalog.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ArtistOverview {
+    pub monthly_listeners: Option<u64>,
+    pub followers: Option<u64>,
+    pub world_rank: Option<u64>,
+    pub biography: Option<String>,
+    /// Instagram, Wikipedia, X…: (name, url).
+    pub links: Vec<(String, String)>,
+    pub header_image: Option<String>,
+    /// The main color of the artist's picture, as Spotify extracted it.
+    pub color: Option<u32>,
+    /// Photos the artist chose for their About section.
+    pub gallery: Vec<String>,
+    pub concerts: Vec<Concert>,
+    /// Where people listen: (city, country code, listeners).
+    pub top_cities: Vec<(String, String, u64)>,
+    /// Playlists that brought listeners to them: (id, name, image).
+    pub discovered_on: Vec<(String, String, Option<String>)>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Concert {
+    pub title: String,
+    /// ISO date-time as Spotify gives it.
+    pub date: String,
+    pub venue: String,
+    pub city: String,
+}
+
+/// The artist overview of Spotify's own web player. Undocumented and
+/// subject to change; every field is optional.
+/// `login` is the desktop client's login (the user's own sign-in); the
+/// streaming session's token is tried after it. Each is sent as the web
+/// player and as a plain client: Spotify accepts different combinations
+/// at different times, and one refusal should not hide the rest.
+pub async fn artist_overview(id: &str, login: &super::api::Auth) -> Result<ArtistOverview> {
+    let session = session().await?;
+    let client_token = session.spclient().client_token().await.unwrap_or_default();
+    let mut tokens = Vec::new();
+    if let Ok(token) = login.token().await {
+        tokens.push(token);
+    }
+    if let Ok(token) = session.login5().auth_token().await {
+        tokens.push(token.access_token);
+    }
+    if tokens.is_empty() {
+        anyhow::bail!("not signed in to Spotify");
+    }
+    let body = json!({
+        "variables": { "uri": format!("spotify:artist:{id}"), "locale": "", "includePrerelease": true },
+        "operationName": "queryArtistOverview",
+        "extensions": { "persistedQuery": { "version": 1, "sha256Hash": ARTIST_OVERVIEW_HASH } },
+    });
+    let mut last = anyhow::anyhow!("Spotify did not answer");
+
+    // First as the desktop app asks, through the session's own client.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    let raw = serde_json::to_vec(&body)?;
+    match session
+        .spclient()
+        .request(
+            &reqwest::Method::POST,
+            "/pathfinder/v2/query",
+            Some(headers),
+            Some(&raw),
+        )
+        .await
+    {
+        Ok(bytes) => {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(artist) = value.pointer("/data/artistUnion").filter(|a| a.is_object()) {
+                    return Ok(parse_overview(artist));
+                }
+                if let Some(error) = value.pointer("/errors/0/message").and_then(Value::as_str) {
+                    last = anyhow::anyhow!("Spotify's web player changed ({error})");
+                }
+            }
+        }
+        Err(err) => last = anyhow::anyhow!("Spotify refused the request ({err})"),
+    }
+
+    // Then directly, introducing itself as a Spotify client does.
+    let agent = format!(
+        "Spotify/{} Linux/0 ({})",
+        librespot_core::version::spotify_version(),
+        librespot_core::version::VERSION_STRING
+    );
+    for token in &tokens {
+        for platform in [Some("WebPlayer"), None] {
+            let mut request = super::http()
+                .post("https://api-partner.spotify.com/pathfinder/v2/query")
+                .bearer_auth(token)
+                .header(reqwest::header::USER_AGENT, &agent)
+                .json(&body);
+            if let Some(platform) = platform {
+                request = request.header("app-platform", platform);
+            }
+            if !client_token.is_empty() {
+                request = request.header("client-token", &client_token);
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(err) => {
+                    last = err.into();
+                    continue;
+                }
+            };
+            let status = response.status();
+            if !status.is_success() {
+                last = if matches!(status.as_u16(), 401 | 403) {
+                    anyhow::anyhow!("Spotify refused the request ({status})")
+                } else {
+                    anyhow::anyhow!("Spotify answered with an error ({status})")
+                };
+                continue;
+            }
+            let value: Value = response.json().await?;
+            if let Some(error) = value.pointer("/errors/0/message").and_then(Value::as_str) {
+                // A stale query is stale for every token.
+                anyhow::bail!("Spotify's web player changed ({error})");
+            }
+            let artist = value
+                .pointer("/data/artistUnion")
+                .filter(|a| a.is_object())
+                .ok_or_else(|| anyhow::anyhow!("Spotify sent no artist"))?;
+            return Ok(parse_overview(artist));
+        }
+    }
+    Err(last)
+}
+
+fn parse_overview(artist: &Value) -> ArtistOverview {
+    let text = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    let number = |path: &str| {
+        artist
+            .pointer(path)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+    };
+    let links = artist
+        .pointer("/profile/externalLinks/items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|l| Some((text(l.get("name"))?, text(l.get("url"))?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let concerts = artist
+        .pointer("/goods/concerts/items")
+        .or_else(|| artist.pointer("/goods/events/concerts/items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| item.get("data").unwrap_or(item))
+                .filter_map(|c| {
+                    let date = text(c.get("startDateIsoString"))
+                        .or_else(|| text(c.pointer("/date/isoString")))?;
+                    Some(Concert {
+                        title: text(c.get("title")).unwrap_or_default(),
+                        date,
+                        venue: text(c.pointer("/location/name"))
+                            .or_else(|| text(c.pointer("/venue/name")))
+                            .unwrap_or_default(),
+                        city: text(c.pointer("/location/city"))
+                            .or_else(|| text(c.pointer("/venue/location/name")))
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let top_cities = artist
+        .pointer("/stats/topCities/items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|c| {
+                    Some((
+                        text(c.get("city"))?,
+                        text(c.get("country")).unwrap_or_default(),
+                        c.get("numberOfListeners")?.as_u64()?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let gallery = artist
+        .pointer("/visuals/gallery/items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| text(i.pointer("/sources/0/url")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let discovered_on = artist
+        .pointer("/relatedContent/discoveredOnV2/items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("data"))
+                .filter(|d| d.get("__typename").and_then(Value::as_str) == Some("Playlist"))
+                .filter_map(|d| {
+                    Some((
+                        text(d.get("id"))?,
+                        text(d.get("name")).unwrap_or_default(),
+                        text(d.pointer("/images/items/0/sources/0/url")),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ArtistOverview {
+        monthly_listeners: number("/stats/monthlyListeners"),
+        followers: number("/stats/followers"),
+        world_rank: number("/stats/worldRank"),
+        biography: text(artist.pointer("/profile/biography/text")).map(|b| strip_tags(&b)),
+        links,
+        header_image: text(artist.pointer("/headerImage/data/sources/0/url"))
+            .or_else(|| text(artist.pointer("/visuals/headerImage/sources/0/url"))),
+        color: text(artist.pointer("/visuals/avatarImage/extractedColors/colorRaw/hex"))
+            .and_then(|hex| u32::from_str_radix(hex.trim_start_matches('#'), 16).ok()),
+        gallery,
+        concerts,
+        top_cities,
+        discovered_on,
+    }
 }
 
 /// What the people you follow play, as the desktop client reads it.
@@ -402,6 +655,17 @@ pub async fn track(uri: &str) -> Result<Track> {
     Ok(serde_json::from_value(value)?)
 }
 
+/// An artist's name and pictures, in the Web API's shape. The session
+/// has no genres or follower count (the overview has followers).
+pub async fn artist_profile(id: &str) -> Result<Artist> {
+    let uri = SpotifyUri::from_uri(&format!("spotify:artist:{id}"))?;
+    let raw: RawArtist = get_many(ExtensionKind::ARTIST_V4, &[uri])
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("artist not found"))?;
+    Ok(serde_json::from_value(artist_json(&raw))?)
+}
+
 /// An album and its tracks, in the Web API's shape.
 pub async fn album(id: &str) -> Result<(Album, Vec<Track>)> {
     let uri = SpotifyUri::from_uri(&format!("spotify:album:{id}"))?;
@@ -423,6 +687,211 @@ pub async fn album(id: &str) -> Result<(Album, Vec<Track>)> {
         .map(|c| json!({ "text": c.text }))
         .collect();
     Ok((serde_json::from_value(value)?, tracks))
+}
+
+/// What an artist page needs beyond the Web API, which no longer lists an
+/// artist's top tracks or related artists for third-party apps.
+#[derive(Clone, Debug, Default)]
+pub struct ArtistExtras {
+    pub top_tracks: Vec<Track>,
+    pub appears_on: Vec<Album>,
+    /// Albums, singles and compilations, newest first.
+    pub discography: Vec<Album>,
+    pub related: Vec<Artist>,
+    pub biography: Option<String>,
+}
+
+impl ArtistExtras {
+    /// The Web API's shapes, for the copy kept on disk.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "top_tracks": self.top_tracks.iter().map(Track::to_api_json).collect::<Vec<_>>(),
+            "appears_on": self.appears_on.iter().map(Album::to_api_json).collect::<Vec<_>>(),
+            "discography": self.discography.iter().map(Album::to_api_json).collect::<Vec<_>>(),
+            "related": self.related.iter().map(Artist::to_api_json).collect::<Vec<_>>(),
+            "biography": self.biography,
+        })
+    }
+
+    pub fn from_json(value: &Value) -> Option<ArtistExtras> {
+        fn list<T: serde::de::DeserializeOwned>(value: &Value, key: &str) -> Option<Vec<T>> {
+            serde_json::from_value(value.get(key)?.clone()).ok()
+        }
+        Some(ArtistExtras {
+            top_tracks: list(value, "top_tracks")?,
+            appears_on: list(value, "appears_on")?,
+            discography: list(value, "discography")?,
+            related: list(value, "related")?,
+            biography: value["biography"].as_str().map(str::to_string),
+        })
+    }
+}
+
+/// An artist's top tracks (for the account's country), the releases they
+/// appear on, similar artists and their biography.
+pub async fn artist(id: &str) -> Result<ArtistExtras> {
+    let session = session().await?;
+    let uri = SpotifyUri::from_uri(&format!("spotify:artist:{id}"))?;
+    let raw: RawArtist = get_many(ExtensionKind::ARTIST_V4, &[uri])
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("artist not found"))?;
+
+    let country = session.country();
+    let top = raw
+        .top_tracks
+        .iter()
+        .find(|t| t.country == country)
+        .or_else(|| raw.top_tracks.first());
+    let top_uris: Vec<&SpotifyUri> = top.map(|t| t.tracks.iter().collect()).unwrap_or_default();
+    let top_tracks: Vec<Track> = tracks(&top_uris)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect();
+
+    let appears: Vec<SpotifyUri> = raw
+        .appears_on_albums
+        .iter()
+        .filter_map(|group| group.0.first().cloned())
+        .take(16)
+        .collect();
+    let appears_on = get_many::<RawAlbum>(ExtensionKind::ALBUM_V4, &appears)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|album| serde_json::from_value(album_json(album)).ok())
+        .collect();
+
+    // Each group is one release in its market variants; the first will do.
+    let releases: Vec<SpotifyUri> = [&raw.albums, &raw.singles, &raw.compilations]
+        .into_iter()
+        .flat_map(|groups| groups.iter().filter_map(|g| g.0.first().cloned()).take(40))
+        .collect();
+    let mut discography: Vec<Album> = get_many::<RawAlbum>(ExtensionKind::ALBUM_V4, &releases)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|album| serde_json::from_value(album_json(album)).ok())
+        .collect();
+    discography.sort_by(|a: &Album, b: &Album| b.release_date.cmp(&a.release_date));
+
+    let related_uris: Vec<SpotifyUri> = raw.related.iter().take(12).map(|a| a.id.clone()).collect();
+    let related = get_many::<RawArtist>(ExtensionKind::ARTIST_V4, &related_uris)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|artist| serde_json::from_value(artist_json(artist)).ok())
+        .collect();
+
+    let biography = raw
+        .biographies
+        .iter()
+        .map(|b| strip_tags(&b.text))
+        .find(|text| !text.trim().is_empty());
+
+    Ok(ArtistExtras {
+        top_tracks,
+        appears_on,
+        discography,
+        related,
+        biography,
+    })
+}
+
+/// Who made a track: performers, writers, producers.
+#[derive(Clone, Debug, Default)]
+pub struct Credits {
+    pub roles: Vec<CreditRole>,
+    /// Where the information comes from (labels, publishers).
+    pub sources: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CreditRole {
+    pub title: String,
+    pub people: Vec<CreditPerson>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CreditPerson {
+    pub name: String,
+    /// Set when the person is an artist on Spotify, for a link.
+    pub artist_id: Option<String>,
+    pub subroles: String,
+}
+
+/// A track's credits, as the official apps show them. Best effort: the
+/// endpoint is Spotify's own and may refuse.
+pub async fn credits(track_id: &str) -> Result<Credits> {
+    let session = session().await?;
+    let endpoint = format!("/track-credits-view/v0/experimental/{track_id}/credits");
+    let bytes = session
+        .spclient()
+        .request_as_json(&reqwest::Method::GET, &endpoint, None, None)
+        .await?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let roles = value
+        .get("roleCredits")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .map(|role| CreditRole {
+                    title: role
+                        .get("roleTitle")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    people: role
+                        .get("artists")
+                        .and_then(Value::as_array)
+                        .map(|people| {
+                            people
+                                .iter()
+                                .map(|p| CreditPerson {
+                                    name: p
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    artist_id: p
+                                        .get("uri")
+                                        .and_then(Value::as_str)
+                                        .and_then(|u| u.strip_prefix("spotify:artist:"))
+                                        .map(str::to_string),
+                                    subroles: p
+                                        .get("subroles")
+                                        .and_then(Value::as_array)
+                                        .map(|s| {
+                                            s.iter()
+                                                .filter_map(Value::as_str)
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        })
+                                        .unwrap_or_default(),
+                                })
+                                .filter(|p| !p.name.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .filter(|r| !r.people.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let sources = value
+        .get("sourceNames")
+        .and_then(Value::as_array)
+        .map(|s| {
+            s.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Credits { roles, sources })
 }
 
 /// Spotify's own lyrics for a track (color-lyrics JSON).
@@ -468,6 +937,83 @@ fn album_json(album: &RawAlbum) -> Value {
         "album_type": kind,
         "artists": album.artists.iter().map(|a| json!({ "id": base62(&a.id), "name": a.name })).collect::<Vec<_>>(),
     })
+}
+
+fn artist_json(artist: &RawArtist) -> Value {
+    let images = if artist.portrait_group.is_empty() {
+        &artist.portraits
+    } else {
+        &artist.portrait_group
+    };
+    json!({
+        "id": base62(&artist.id),
+        "uri": artist.id.to_uri().unwrap_or_default(),
+        "name": artist.name,
+        "images": images_json(images),
+    })
+}
+
+/// Biographies come with links as HTML and characters escaped as HTML
+/// entities (`&amp;`, `&#34;`, `&#xff1a;`).
+pub fn strip_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    decode_entities(&out)
+}
+
+pub fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let decoded = tail.find(';').filter(|end| *end <= 12).and_then(|end| {
+            let name = &tail[1..end];
+            let c = if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+            } else if let Some(dec) = name.strip_prefix('#') {
+                dec.parse().ok().and_then(char::from_u32)
+            } else {
+                Some(match name {
+                    "amp" => '&',
+                    "quot" => '"',
+                    "apos" => '\'',
+                    "lt" => '<',
+                    "gt" => '>',
+                    "nbsp" => ' ',
+                    "hellip" => '…',
+                    "mdash" => '—',
+                    "ndash" => '–',
+                    "lsquo" => '‘',
+                    "rsquo" => '’',
+                    "ldquo" => '“',
+                    "rdquo" => '”',
+                    _ => return None,
+                })
+            }?;
+            Some((c, end + 1))
+        });
+        match decoded {
+            Some((c, used)) => {
+                out.push(c);
+                rest = &tail[used..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn image_url(file_id: &[u8]) -> String {
@@ -532,4 +1078,43 @@ fn track_json(track: &RawTrack, uri: &str) -> Value {
             "images": images,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_an_artist_overview() {
+        let artist = json!({
+            "stats": { "monthlyListeners": 4200000, "followers": 900000, "worldRank": 0 },
+            "profile": {
+                "biography": { "text": "Formed in <a href=\"x\">2017</a> &amp; more" },
+                "externalLinks": { "items": [ { "name": "INSTAGRAM", "url": "https://instagram.com/x" } ] }
+            },
+            "headerImage": { "data": { "sources": [ { "url": "https://i.scdn.co/image/h" } ] } },
+            "goods": { "concerts": { "items": [
+                { "data": { "title": "Tour", "startDateIsoString": "2027-03-01T19:00:00Z",
+                            "location": { "name": "Hall", "city": "Tokyo" } } }
+            ] } },
+            "relatedContent": { "discoveredOnV2": { "items": [
+                { "data": { "__typename": "GenericError" } },
+                { "data": { "__typename": "Playlist", "id": "p1", "name": "This Is X" } }
+            ] } }
+        });
+        let o = parse_overview(&artist);
+        assert_eq!(o.monthly_listeners, Some(4_200_000));
+        assert_eq!(o.world_rank, None);
+        assert_eq!(o.biography.as_deref(), Some("Formed in 2017 & more"));
+        assert_eq!(o.links[0].0, "INSTAGRAM");
+        assert_eq!(o.header_image.as_deref(), Some("https://i.scdn.co/image/h"));
+        assert_eq!(o.concerts[0].city, "Tokyo");
+        assert_eq!(o.concerts[0].venue, "Hall");
+        assert_eq!(o.discovered_on.len(), 1);
+        assert!(parse_overview(&json!({})).concerts.is_empty());
+        assert_eq!(
+            strip_tags("&#34;Tokyo Ghoul&#xff1a;re&#34; &amp; <b>more</b> &unknown; a&b"),
+            "\"Tokyo Ghoul：re\" & more &unknown; a&b"
+        );
+    }
 }

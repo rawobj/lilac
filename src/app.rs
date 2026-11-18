@@ -5,6 +5,7 @@
 
 use gpui_kit::*;
 
+use crate::artists::Artists;
 use crate::feed::Feed;
 use crate::friends::Friends;
 use crate::library::Library;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub feed: Entity<Feed>,
     pub friends: Entity<Friends>,
     pub soloist: Entity<Soloist>,
+    pub artists: Entity<Artists>,
 }
 
 impl Global for AppState {}
@@ -47,6 +49,7 @@ impl AppState {
         let feed = cx.new(|cx| Feed::new(&session, cx));
         let friends = cx.new(|cx| Friends::new(&ui, cx));
         let soloist = cx.new(Soloist::new);
+        let artists = cx.new(|_| Artists::default());
 
         // `lilac spotify:album:…` or an open.spotify.com link opens that page directly.
         if let Some(route) = std::env::args()
@@ -67,6 +70,7 @@ impl AppState {
             feed,
             friends,
             soloist,
+            artists,
         });
         // Connect to Spotify while the stored login is still being checked.
         player.update(cx, |player, cx| player.start_with_stored_login(cx));
@@ -111,6 +115,10 @@ pub fn friends(cx: &App) -> Entity<Friends> {
 
 pub fn soloist(cx: &App) -> Entity<Soloist> {
     cx.global::<AppState>().soloist.clone()
+}
+
+pub fn artists(cx: &App) -> Entity<Artists> {
+    cx.global::<AppState>().artists.clone()
 }
 
 pub fn api(cx: &App) -> Api {

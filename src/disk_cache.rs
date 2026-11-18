@@ -1,7 +1,7 @@
 //! Small JSON records kept on disk for things that rarely change: song and
-//! album details, lyrics. A record older than its store's limit is not
-//! returned; callers that want to show an old copy while they check for a
-//! new one look at `Hit::age`.
+//! album details, lyrics, artist pages. A record older than its store's
+//! limit is not returned; callers that want to show an old copy while they
+//! check for a new one look at `Hit::age`.
 //!
 //! Each record is one file under `~/.cache/lilac/<store>/`, named by a
 //! base62 id. Stores are bounded by file count; the oldest files go first.
@@ -30,6 +30,8 @@ pub static TRACKS: Store = Store::new("tracks", 60, 40_000);
 pub static ALBUMS: Store = Store::new("albums", 60, 2_000);
 /// Lyrics; also "none found", which callers expire sooner.
 pub static LYRICS: Store = Store::new("lyrics", 180, 10_000);
+/// Artist pages: profile, sections and overview.
+pub static ARTISTS: Store = Store::new("artists", 30, 1_000);
 
 /// Prune every this many writes, not on each one.
 const PRUNE_EVERY: u32 = 200;
@@ -118,7 +120,7 @@ impl Store {
 
 /// Forget everything, e.g. on logout.
 pub fn clear() {
-    for store in [&TRACKS, &ALBUMS, &LYRICS] {
+    for store in [&TRACKS, &ALBUMS, &LYRICS, &ARTISTS] {
         let _ = std::fs::remove_dir_all(store.dir());
     }
 }

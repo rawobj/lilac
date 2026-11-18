@@ -72,6 +72,8 @@ impl RightPanelView {
         .detach();
         cx.observe(&app::friends(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&app::artists(cx), |_, _, cx| cx.notify())
+            .detach();
         Self {
             scroll: ScrollHandle::new(),
             friends_scroll: ScrollHandle::new(),
@@ -187,60 +189,10 @@ impl RightPanelView {
             );
 
         if let Some(artist) = artist.filter(|a| !a.id.is_empty()) {
-            let id = artist.id.clone();
-            body = body.child(
-                div()
-                    .id("about-artist")
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .rounded(px(theme::RADIUS_CARD))
-                    .cursor_pointer()
-                    .bg(theme::glass_fill_strong())
-                    .hover(|s| s.bg(theme::active_fill()))
-                    .child(
-                        div()
-                            .size(px(40.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(theme::accent_alpha(0.18))
-                            .child(
-                                svg()
-                                    .path(icons::USER)
-                                    .size(px(18.0))
-                                    .text_color(theme::accent_soft()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child("About the artist"),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(artist.name),
-                            ),
-                    )
-                    .child(
-                        svg()
-                            .path(icons::CHEVRON_RIGHT)
-                            .size(px(16.0))
-                            .text_color(theme::text_muted()),
-                    )
-                    .on_click(move |_, _, cx| app::navigate(Route::Artist(id.clone()), cx)),
-            );
+            body = body.child(about_artist(&artist, window, cx));
+        }
+        if !track.is_episode() && !track.id.is_empty() {
+            body = body.children(credits(&track, cx));
         }
 
         if let Some(next) = next {
@@ -841,7 +793,418 @@ impl Render for RightPanelView {
     }
 }
 
+/// The card about the playing track's first artist, like the official
+/// apps: their picture, name, followers, the start of their biography and
+/// a Follow button. Fills in as the details arrive.
+fn about_artist(artist: &crate::model::ArtistRef, window: &Window, cx: &mut App) -> Stateful<Div> {
+    let id = artist.id.clone();
+    let store = app::artists(cx);
+    store.update(cx, |s, cx| s.ensure(&id, cx));
+    let details = store.read(cx).get(&id).cloned().unwrap_or_default();
+    let profile = details.profile.clone();
+    let following = app::library(cx).read(cx).is_saved(&id);
+    let edge = theme::RIGHT_PANEL_WIDTH - 34.0;
+    let overview = details.overview.clone().unwrap_or_default();
+    let image = overview
+        .header_image
+        .clone()
+        .map(SharedString::from)
+        .or_else(|| {
+            profile
+                .as_ref()
+                .and_then(|p| p.images.for_size(edge as u32))
+        });
+    let followers = profile
+        .as_ref()
+        .and_then(|p| p.followers.as_ref())
+        .map(|f| f.total)
+        .filter(|n| *n > 0)
+        .or(overview.followers);
+    let audience = match (overview.monthly_listeners, followers) {
+        (Some(n), _) => Some(format!(
+            "{} monthly listeners",
+            crate::model::format_count(n)
+        )),
+        (None, Some(n)) => Some(format!("{} followers", crate::model::format_count(n))),
+        _ => None,
+    };
+    let bio = overview
+        .biography
+        .clone()
+        .or_else(|| details.extras.as_ref().and_then(|e| e.biography.clone()));
+    let links = overview.links.clone();
+    let concerts = overview.concerts.clone();
+    let genres: Vec<SharedString> = profile
+        .as_ref()
+        .map(|p| p.genres.iter().take(3).cloned().collect())
+        .unwrap_or_default();
+    let open = {
+        let id = id.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            app::navigate(Route::Artist(id.clone()), cx)
+        }
+    };
+
+    div()
+        .id("about-artist")
+        .flex()
+        .flex_col()
+        .rounded(px(theme::RADIUS_CARD))
+        .overflow_hidden()
+        .bg(theme::glass_fill_strong())
+        .child(
+            div()
+                .id("about-artist-picture")
+                .relative()
+                .cursor_pointer()
+                .child(match &image {
+                    Some(_) => ui::cover(image.clone(), edge, 0.0, Placeholder::Artist, window, cx)
+                        .h(px(edge * 0.66)),
+                    None => div().h(px(56.0)).w_full().bg(theme::accent_alpha(0.12)),
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .top_3()
+                        .left_3()
+                        .px_2()
+                        .py(px(3.0))
+                        .rounded_full()
+                        .bg(theme::black(0.5))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("About the artist"),
+                )
+                .on_click(open.clone()),
+        )
+        .child(
+            div()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("about-artist-name")
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .child(
+                                    profile
+                                        .as_ref()
+                                        .map(|p| p.name.clone())
+                                        .unwrap_or_else(|| artist.name.clone()),
+                                )
+                                .on_click(open),
+                        )
+                        .child({
+                            let id = id.clone();
+                            let profile = profile.clone();
+                            ui::pill_button(
+                                "about-follow",
+                                if following { "Following" } else { "Follow" },
+                                false,
+                            )
+                            .when(profile.is_none(), |b| b.opacity(0.5))
+                            .on_click(move |_, _, cx| {
+                                if let Some(artist) = profile.clone() {
+                                    let item = crate::library::SavedEntity::Artist(artist);
+                                    app::library(cx).update(cx, |l, cx| l.toggle_saved(item, cx));
+                                } else {
+                                    let _ = &id;
+                                }
+                            })
+                        }),
+                )
+                .children(
+                    audience
+                        .map(|line| div().text_sm().text_color(theme::text_muted()).child(line)),
+                )
+                .when(!genres.is_empty(), |d| {
+                    d.child(div().flex().flex_wrap().gap_1().children(
+                        genres.iter().enumerate().map(|(ix, g)| {
+                            div()
+                                .id(("about-genre", ix))
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded_full()
+                                .bg(theme::white(0.08))
+                                .text_xs()
+                                .child(g.clone())
+                        }),
+                    ))
+                })
+                .children(bio.map(|bio| {
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_normal()
+                        .text_sm()
+                        .text_color(theme::text_muted())
+                        .child(excerpt(&bio, 160))
+                }))
+                .when(!links.is_empty(), |d| d.child(link_pills("about", &links)))
+                .when(!concerts.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .pt_2()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_weight(FontWeight::BOLD).child("On tour"))
+                            .children(concerts.iter().take(3).map(concert_row)),
+                    )
+                }),
+        )
+}
+
+/// Social and web links as small pills that open in the browser.
+pub fn link_pills(key: &str, links: &[(String, String)]) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_1()
+        .children(links.iter().enumerate().map(|(ix, (name, url))| {
+            let url = url.clone();
+            div()
+                .id(SharedString::from(format!("{key}-link-{ix}")))
+                .px_2()
+                .py(px(3.0))
+                .rounded_full()
+                .border_1()
+                .border_color(theme::glass_border())
+                .text_xs()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::white(0.08)))
+                .child(link_label(name))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        }))
+}
+
+fn link_label(name: &str) -> String {
+    match name.to_ascii_uppercase().as_str() {
+        "INSTAGRAM" => "Instagram".into(),
+        "TWITTER" | "X" => "X".into(),
+        "FACEBOOK" => "Facebook".into(),
+        "WIKIPEDIA" => "Wikipedia".into(),
+        "YOUTUBE" => "YouTube".into(),
+        "TIKTOK" => "TikTok".into(),
+        "SOUNDCLOUD" => "SoundCloud".into(),
+        _ => {
+            let mut chars = name.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// A concert: the day, and the city and venue.
+pub fn concert_row(concert: &crate::spotify::streaming::Concert) -> Div {
+    let (month, day) = concert_day(&concert.date);
+    let place = [concert.venue.as_str(), concert.title.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_none()
+                .w(px(44.0))
+                .py_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .rounded(px(8.0))
+                .bg(theme::white(0.08))
+                .child(div().text_xs().text_color(theme::text_muted()).child(month))
+                .child(div().font_weight(FontWeight::BOLD).child(day)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(if concert.city.is_empty() {
+                            concert.title.clone()
+                        } else {
+                            concert.city.clone()
+                        }),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(place),
+                ),
+        )
+}
+
+/// ("Mar", "1") from "2027-03-01T19:00:00Z".
+fn concert_day(iso: &str) -> (String, String) {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = iso
+        .get(5..7)
+        .and_then(|m| m.parse::<usize>().ok())
+        .and_then(|m| MONTHS.get(m.wrapping_sub(1)))
+        .copied()
+        .unwrap_or("");
+    let day = iso
+        .get(8..10)
+        .and_then(|d| d.parse::<u32>().ok())
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    (month.to_string(), day)
+}
+
+/// Who made the track, when Spotify says.
+fn credits(track: &Track, cx: &mut App) -> Option<Div> {
+    let store = app::artists(cx);
+    store.update(cx, |s, cx| s.ensure_credits(&track.id, cx));
+    let credits = store.read(cx).credits(&track.id).cloned()?;
+    if credits.roles.is_empty() {
+        return None;
+    }
+    let mut list = div().flex().flex_col().gap_3();
+    let mut shown = 0;
+    for (r, role) in credits.roles.iter().enumerate() {
+        for (p, person) in role.people.iter().enumerate() {
+            if shown == 8 {
+                break;
+            }
+            shown += 1;
+            let detail = if person.subroles.is_empty() {
+                role.title.clone()
+            } else {
+                capitalize(&person.subroles)
+            };
+            let link = person.artist_id.clone();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("credit-{r}-{p}")))
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(person.name.clone())
+                            .when_some(link, |d, id| {
+                                d.cursor_pointer().hover(|s| s.underline()).on_click(
+                                    move |_, _, cx| {
+                                        app::navigate(Route::Artist(id.clone().into()), cx)
+                                    },
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(detail),
+                    ),
+            );
+        }
+    }
+    Some(
+        div()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded(px(theme::RADIUS_CARD))
+            .bg(theme::glass_fill_strong())
+            .child(div().font_weight(FontWeight::BOLD).child("Credits"))
+            .child(list)
+            .when(!credits.sources.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_subtle())
+                        .child(format!("Sources: {}", credits.sources.join(", "))),
+                )
+            }),
+    )
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn retry_friends() -> Stateful<Div> {
     ui::pill_button("friends-retry", "Try again", false)
         .on_click(|_, _, cx| app::friends(cx).update(cx, |f, cx| f.retry(cx)))
+}
+
+/// A biography as one paragraph, for a few clamped lines (line clamping
+/// does not cope with paragraph breaks).
+pub fn one_paragraph(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| !is_divider(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// "------------------" between a biography's languages.
+fn is_divider(text: &str) -> bool {
+    let text = text.trim();
+    text.len() >= 3
+        && text
+            .chars()
+            .all(|c| matches!(c, '-' | '=' | '_' | '*' | '—'))
+}
+
+/// A biography's paragraphs, for showing it in full.
+pub fn paragraphs(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !is_divider(line))
+        .map(one_paragraph)
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// The start of a biography, cut at a word near `chars` characters with
+/// an ellipsis. Used instead of line clamping, which cuts the last line
+/// off mid-word in GPUI.
+pub fn excerpt(text: &str, chars: usize) -> String {
+    let flat = one_paragraph(text);
+    if flat.chars().count() <= chars {
+        return flat;
+    }
+    let cut: String = flat.chars().take(chars).collect();
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > chars / 2 => &cut[..space],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end_matches([',', '.', ';', ':', ' ']))
 }

@@ -353,6 +353,20 @@ pub struct Artist {
     pub followers: Option<Followers>,
 }
 
+impl Artist {
+    /// The Web API's shape, readable by `Artist`'s deserializer.
+    pub fn to_api_json(&self) -> Value {
+        json!({
+            "id": self.id.as_ref(),
+            "uri": self.uri.as_ref(),
+            "name": self.name.as_ref(),
+            "images": self.images.to_api_json(),
+            "genres": self.genres.iter().map(|g| g.as_ref()).collect::<Vec<_>>(),
+            "followers": self.followers.as_ref().map(|f| json!({ "total": f.total })),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct Owner {
     #[serde(default, deserialize_with = "null_default")]

@@ -1,6 +1,7 @@
 //! Artwork cards and the horizontal shelves they sit in.
 
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Placeholder, cover, play_button};
@@ -127,14 +128,16 @@ impl RenderOnce for Shelf {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .px_6()
-                    .text_xl()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme::text())
-                    .child(self.title),
-            )
+            .when(!self.title.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_6()
+                        .text_xl()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme::text())
+                        .child(self.title),
+                )
+            })
             .child(
                 div()
                     .id(self.id)

@@ -1,5 +1,6 @@
 mod actions;
 mod app;
+mod artists;
 mod assets;
 mod disk_cache;
 mod feed;

@@ -95,6 +95,10 @@ pub enum Dialog {
     SoloistSetup,
     /// The installed Soloist build no longer runs.
     SoloistExpired,
+    /// Everything about an artist, from the About card on their page.
+    ArtistAbout {
+        id: SharedString,
+    },
 }
 
 pub struct UiState {
