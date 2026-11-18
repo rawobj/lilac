@@ -3972,6 +3972,7 @@ name = "lilac"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures-util",
  "getrandom 0.3.4",
  "gpui-kit",
@@ -3985,12 +3986,15 @@ dependencies = [
  "librespot-playback",
  "librespot-protocol",
  "mpris-server",
+ "open",
  "protobuf",
+ "rand 0.9.5",
  "reqwest 0.13.5",
  "rodio",
  "rustls 0.23.45",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smallvec",
  "tokio",
  "tokio-tungstenite",
