@@ -1932,14 +1932,17 @@ impl Player {
                             cx.notify();
                         });
                     }
-                    // Soloist is told directly for a list from its start (it
-                    // plays the album or playlist itself), and while Spotify
-                    // does not list it yet. Only Spotify can start a list
-                    // part-way; Soloist alone plays that track and queues
-                    // the rest.
+                    // Soloist is told directly: always for a list from its
+                    // start (it plays the album or playlist itself), and for
+                    // a start further in whenever Spotify cannot be asked.
+                    // Only Spotify can start a list part-way; Soloist alone
+                    // plays that track and queues the rest.
                     let from_top = context.is_some()
                         && offset.as_ref().is_none_or(|o| tracks.first() == Some(o));
-                    if from_top || device_id == crate::soloist::LOCAL_DEVICE {
+                    if from_top
+                        || device_id == crate::soloist::LOCAL_DEVICE
+                        || crate::spotify::api::penalty_left().is_some()
+                    {
                         // Soloist starts a URI at its beginning; the place
                         // is sought once that track plays.
                         if position_ms > 0

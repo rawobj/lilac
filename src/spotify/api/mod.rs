@@ -145,6 +145,15 @@ impl Api {
         } else {
             format!("{BASE}{path}")
         };
+        // Spotify asked for a long pause: honour it without asking again,
+        // which would only lengthen it.
+        if let Some(wait) = penalty_left() {
+            return Err(ApiError {
+                status: 429,
+                message: limit_message(wait),
+            }
+            .into());
+        }
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -183,9 +192,10 @@ impl Api {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     continue;
                 }
+                note_penalty(wait);
                 return Err(ApiError {
                     status: 429,
-                    message: format!("Spotify is limiting requests right now; try again in {wait} s."),
+                    message: limit_message(wait),
                 }
                 .into());
             }
@@ -235,4 +245,37 @@ impl Api {
     pub async fn me(&self) -> Result<User> {
         self.get("/me").await
     }
+}
+
+/// Unix seconds until which Spotify asked Lilac to stop sending requests.
+static PENALTY_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn note_penalty(wait: u64) {
+    PENALTY_UNTIL.fetch_max(unix_now() + wait, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Seconds left of a rate-limit pause, if one is running.
+pub fn penalty_left() -> Option<u64> {
+    let until = PENALTY_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    until.checked_sub(unix_now()).filter(|left| *left > 0)
+}
+
+/// "Spotify is limiting Lilac's requests; this clears in about 14 hours."
+pub fn limit_message(wait: u64) -> String {
+    let when = match wait {
+        0..=90 => format!("{wait} seconds"),
+        91..=5400 => format!("{} minutes", wait.div_ceil(60)),
+        _ => format!("{} hours", wait.div_ceil(3600)),
+    };
+    format!(
+        "Spotify is limiting Lilac's requests for now; this clears in about {when}. \
+         What Lilac has loaded already keeps working."
+    )
 }

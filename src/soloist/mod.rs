@@ -631,7 +631,10 @@ impl Soloist {
                     .timer(Duration::from_secs(delay))
                     .await;
                 // Only Spotify's Web API knows the id, and only starting a
-                // list part-way needs it.
+                // list part-way needs it; while that API is paused, stop.
+                if crate::spotify::api::penalty_left().is_some() {
+                    return;
+                }
                 let api = api.clone();
                 let Ok(list) = runtime::run(async move { api.remote_devices().await }).await else {
                     continue;
@@ -658,7 +661,7 @@ impl Soloist {
                     return;
                 }
             }
-            // Not listed: local control
+            // Not listed (or Spotify cannot be asked): local control
             // keeps working; nothing to fail.
             let _ = this;
         }));

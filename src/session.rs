@@ -149,6 +149,7 @@ impl Session {
             Credentials::forget_all();
             crate::playlist_cache::clear();
             crate::disk_cache::clear();
+            let _ = std::fs::remove_file(profile_file());
             let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());
             runtime::spawn(async move {
                 web.set(None).await;
@@ -168,12 +169,32 @@ impl Session {
         cx.notify();
     }
 
+    /// With a profile kept from last time, Lilac starts at once and checks
+    /// it behind the scenes; the first sign-in waits for it.
     fn fetch_profile(&mut self, cx: &mut Context<Self>) {
+        if let Some(user) = load_profile().filter(|u| !u.id.is_empty()) {
+            // Announced on the next tick: this runs from `new`, before the
+            // player and library have subscribed.
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| {
+                    this.user = Some(user);
+                    this.status = Status::LoggedIn;
+                    this.error = None;
+                    cx.emit(SessionEvent::Ready);
+                    cx.notify();
+                    this.refresh_profile(cx);
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = runtime::run(async move { api.me().await }).await;
             this.update(cx, |this, cx| match result {
                 Ok(user) => {
+                    save_profile(&user);
                     this.user = Some(user);
                     this.status = Status::LoggedIn;
                     this.error = None;
@@ -181,12 +202,51 @@ impl Session {
                     cx.notify();
                 }
                 Err(err) => {
-                    // Only a rejected token means the login is gone. Being offline does not.
+                    // Only a rejected token means the login is gone.
                     if matches!(status_of(&err), Some(400 | 401 | 403)) {
                         Credentials::forget_all();
+                        this.fail(err, cx);
+                        return;
                     }
-                    this.fail(err, cx);
+                    // Offline or rate limited: stay signed in and say what
+                    // is going on; the profile fills in once Spotify answers.
+                    this.user = Some(Default::default());
+                    this.status = Status::LoggedIn;
+                    this.error = None;
+                    cx.emit(SessionEvent::Ready);
+                    crate::app::toast_error(format!("{err:#}"), cx);
+                    cx.notify();
+                    this.refresh_profile(cx);
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask Spotify for the profile again, behind what is shown.
+    fn refresh_profile(&mut self, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime::run(async move { api.me().await }).await;
+            this.update(cx, |this, cx| match result {
+                Ok(user) => {
+                    if this.status != Status::LoggedIn || this.is_demo() {
+                        return;
+                    }
+                    save_profile(&user);
+                    this.user = Some(user);
+                    cx.notify();
+                }
+                Err(err) if matches!(status_of(&err), Some(401)) => {
+                    // The login was revoked while Lilac kept the old profile.
+                    Credentials::forget_all();
+                    let _ = std::fs::remove_file(profile_file());
+                    this.user = None;
+                    this.fail(err, cx);
+                    cx.emit(SessionEvent::LoggedOut);
+                }
+                Err(_) => {}
             })
             .ok();
         })
@@ -200,4 +260,27 @@ fn auths() -> (Arc<Auth>, Arc<Auth>) {
         Arc::new(Auth::load(Client::web())),
         Arc::new(Auth::load(Client::streaming())),
     )
+}
+
+fn profile_file() -> std::path::PathBuf {
+    crate::paths::config_dir().join("profile.json")
+}
+
+/// The signed-in profile, kept for starts when Spotify cannot be asked.
+fn save_profile(user: &crate::model::User) {
+    let value = serde_json::json!({
+        "id": user.id.as_ref(),
+        "display_name": user.display_name.as_ref().map(|n| n.as_ref()),
+        "images": user.images.to_api_json(),
+        "product": user.product.as_ref().map(|p| p.as_ref()),
+        "country": user.country.as_ref().map(|c| c.as_ref()),
+    });
+    if let Ok(raw) = serde_json::to_vec(&value) {
+        let _ = crate::paths::write_private(&profile_file(), &raw);
+    }
+}
+
+fn load_profile() -> Option<crate::model::User> {
+    let raw = std::fs::read(profile_file()).ok()?;
+    serde_json::from_slice(&raw).ok()
 }
