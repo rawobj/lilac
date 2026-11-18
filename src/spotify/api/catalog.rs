@@ -4,8 +4,21 @@ use anyhow::Result;
 
 use super::super::enc;
 use super::{Api, is_unsupported, status_of};
+use serde_json::{Value, json};
+
+use crate::disk_cache;
 use crate::model::*;
 use crate::spotify::streaming;
+
+fn read_album(value: &Value) -> Option<(Album, Vec<Track>)> {
+    // Artist names follow the language they were asked in.
+    if value.get("lang")?.as_str()? != streaming::language() {
+        return None;
+    }
+    let album = serde_json::from_value(value.get("album")?.clone()).ok()?;
+    let tracks = serde_json::from_value(value.get("tracks")?.clone()).ok()?;
+    Some((album, tracks))
+}
 
 impl Api {
     pub async fn album(&self, id: &str) -> Result<Album> {
@@ -39,28 +52,80 @@ impl Api {
         Ok(tracks)
     }
 
-    pub async fn playlist(&self, id: &str) -> Result<Playlist> {
-        match self.get(&format!("/playlists/{id}")).await {
-            Err(err) if !self.is_demo() && status_of(&err) == Some(403) => {
-                streaming::playlist(id).await
-            }
-            other => other,
+    /// An album and all its tracks: the copy kept on disk when there is
+    /// one, else from Spotify. For playing; the album page shows the kept
+    /// copy and checks for changes behind it ([`Self::album_kept`],
+    /// [`Self::fetch_album`]).
+    pub async fn album_with_tracks(&self, id: &str) -> Result<(Album, Vec<Track>)> {
+        if let Some((album, _)) = self.album_kept(id).await {
+            return Ok(album);
         }
+        self.fetch_album(id).await
     }
 
-    /// Lilac's app may only list the user's own playlists through the Web
-    /// API; others are read through the streaming session.
+    /// The album as kept on disk, with its age.
+    pub async fn album_kept(&self, id: &str) -> Option<((Album, Vec<Track>), std::time::Duration)> {
+        if self.is_demo() {
+            return None;
+        }
+        let key = id.to_string();
+        tokio::task::spawn_blocking(move || disk_cache::ALBUMS.get(&key))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|hit| Some((read_album(&hit.value)?, hit.age)))
+    }
+
+    /// The album from Spotify (the streaming session, the Web API only
+    /// when that fails), kept on disk for next time.
+    pub async fn fetch_album(&self, id: &str) -> Result<(Album, Vec<Track>)> {
+        if self.is_demo() {
+            let album = self.album(id).await?;
+            let tracks = self.album_tracks(&album).await?;
+            return Ok((album, tracks));
+        }
+        let (album, tracks) = match streaming::album(id).await {
+            Ok(found) => found,
+            Err(err) => {
+                eprintln!("lilac: album from the session failed: {err:#}");
+                let album = self.album(id).await?;
+                let tracks = self.album_tracks(&album).await?;
+                (album, tracks)
+            }
+        };
+        let value = json!({
+            "lang": streaming::language(),
+            "album": album.to_api_json(),
+            "tracks": tracks.iter().map(Track::to_api_json).collect::<Vec<_>>(),
+        });
+        let key = id.to_string();
+        tokio::task::spawn_blocking(move || disk_cache::ALBUMS.put(&key, &value));
+        Ok((album, tracks))
+    }
+
+    /// From the streaming session; the Web API only when that fails.
+    pub async fn playlist(&self, id: &str) -> Result<Playlist> {
+        if !self.is_demo() {
+            match streaming::playlist(id).await {
+                Ok(playlist) => return Ok(playlist),
+                Err(err) => eprintln!("lilac: playlist from the session failed: {err:#}"),
+            }
+        }
+        self.get(&format!("/playlists/{id}")).await
+    }
+
+    /// From the streaming session; the Web API only when that fails (and
+    /// it lists only the user's own playlists for Lilac's app).
     pub async fn playlist_items(&self, id: &str, offset: u32) -> Result<Page<SavedItem>> {
+        if !self.is_demo()
+            && let Ok(page) = streaming::playlist_items(id, offset).await
+        {
+            return Ok(page);
+        }
         let query = format!("limit=100&offset={offset}&additional_types=track,episode");
-        let result = match self.get(&format!("/playlists/{id}/items?{query}")).await {
+        match self.get(&format!("/playlists/{id}/items?{query}")).await {
             Err(err) if status_of(&err) != Some(403) && is_unsupported(&err) => {
                 self.get(&format!("/playlists/{id}/tracks?{query}")).await
-            }
-            other => other,
-        };
-        match result {
-            Err(err) if !self.is_demo() && status_of(&err) == Some(403) => {
-                streaming::playlist_items(id, offset).await
             }
             other => other,
         }

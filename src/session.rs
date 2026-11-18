@@ -8,6 +8,7 @@ use crate::model::User;
 use crate::runtime;
 use crate::spotify::api::{Api, Auth, status_of};
 use crate::spotify::oauth::{self, Client, Credentials};
+use crate::spotify::streaming;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -224,11 +225,21 @@ impl Session {
         .detach();
     }
 
-    /// Ask Spotify for the profile again, behind what is shown.
+    /// The profile from the streaming session (which comes up once Ready
+    /// has gone out), the Web API only when that fails.
     fn refresh_profile(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = runtime::run(async move { api.me().await }).await;
+            let result = runtime::run(async move {
+                match streaming::profile().await {
+                    Ok(user) => Ok(user),
+                    Err(err) => {
+                        eprintln!("lilac: profile from the session failed: {err:#}");
+                        api.me().await
+                    }
+                }
+            })
+            .await;
             this.update(cx, |this, cx| match result {
                 Ok(user) => {
                     if this.status != Status::LoggedIn || this.is_demo() {

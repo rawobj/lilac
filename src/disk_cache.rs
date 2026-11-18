@@ -1,6 +1,7 @@
-//! Small JSON records kept on disk for things that rarely change: lyrics.
-//! A record older than its store's limit is not returned; callers that want
-//! to show an old copy while they check for a new one look at `Hit::age`.
+//! Small JSON records kept on disk for things that rarely change: song and
+//! album details, lyrics. A record older than its store's limit is not
+//! returned; callers that want to show an old copy while they check for a
+//! new one look at `Hit::age`.
 //!
 //! Each record is one file under `~/.cache/lilac/<store>/`, named by a
 //! base62 id. Stores are bounded by file count; the oldest files go first.
@@ -23,6 +24,10 @@ pub struct Store {
 
 const DAY: u64 = 24 * 3600;
 
+/// Song details (names, artists, album, artwork URLs).
+pub static TRACKS: Store = Store::new("tracks", 60, 40_000);
+/// Albums with their track lists.
+pub static ALBUMS: Store = Store::new("albums", 60, 2_000);
 /// Lyrics; also "none found", which callers expire sooner.
 pub static LYRICS: Store = Store::new("lyrics", 180, 10_000);
 
@@ -113,7 +118,7 @@ impl Store {
 
 /// Forget everything, e.g. on logout.
 pub fn clear() {
-    for store in [&LYRICS] {
+    for store in [&TRACKS, &ALBUMS, &LYRICS] {
         let _ = std::fs::remove_dir_all(store.dir());
     }
 }
@@ -124,9 +129,9 @@ mod tests {
 
     #[test]
     fn only_plain_keys_become_file_names() {
-        assert!(LYRICS.file("4MEr1Y8pLCtZ4gW5MriwB9").is_some());
-        assert!(LYRICS.file("4MEr1Y8pLCtZ4gW5MriwB9-en").is_some());
-        assert!(LYRICS.file("../settings").is_none());
-        assert!(LYRICS.file("").is_none());
+        assert!(TRACKS.file("4MEr1Y8pLCtZ4gW5MriwB9").is_some());
+        assert!(TRACKS.file("4MEr1Y8pLCtZ4gW5MriwB9-en").is_some());
+        assert!(TRACKS.file("../settings").is_none());
+        assert!(TRACKS.file("").is_none());
     }
 }

@@ -277,6 +277,27 @@ pub struct Album {
 }
 
 impl Album {
+    /// The Web API's shape, readable by `Album`'s deserializer: what library
+    /// lists show, for the copy Lilac keeps on disk.
+    pub fn to_api_json(&self) -> Value {
+        let artists: Vec<_> = self
+            .artists
+            .iter()
+            .map(|a| json!({ "id": a.id.as_ref(), "name": a.name.as_ref() }))
+            .collect();
+        json!({
+            "id": self.id.as_ref(),
+            "uri": self.uri.as_ref(),
+            "name": self.name.as_ref(),
+            "artists": artists,
+            "images": self.images.to_api_json(),
+            "release_date": self.release_date.as_ref(),
+            "total_tracks": self.total_tracks,
+            "album_type": self.album_type.as_ref(),
+            "copyrights": self.copyrights.iter().map(|c| json!({ "text": c.text.as_ref() })).collect::<Vec<_>>(),
+        })
+    }
+
     pub fn year(&self) -> &str {
         self.release_date.get(..4).unwrap_or("")
     }

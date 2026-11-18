@@ -11,8 +11,7 @@ pub fn play_album(id: SharedString, cx: &mut App) {
     let api = app::api(cx);
     cx.spawn(async move |cx| {
         let result = runtime::run(async move {
-            let album = api.album(&id).await?;
-            let tracks = api.album_tracks(&album).await?;
+            let (album, tracks) = api.album_with_tracks(&id).await?;
             Ok((album, tracks))
         })
         .await;

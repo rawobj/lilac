@@ -2321,7 +2321,15 @@ impl Player {
         let api = app::api(cx);
         self.lookup = Some(cx.spawn(async move |this, cx| {
             let lookup_uri = uri.clone();
-            let result = runtime::run(async move { api.item(&lookup_uri).await }).await;
+            // The streaming session (in the user's language); the Web API
+            // only when that fails.
+            let result = runtime::run(async move {
+                match crate::spotify::streaming::track(&lookup_uri).await {
+                    Ok(track) => Ok(track),
+                    Err(_) => api.item(&lookup_uri).await,
+                }
+            })
+            .await;
             this.update(cx, |this, cx| {
                 let shown = this.current.as_ref().is_some_and(|t| t.uri.as_ref() == uri);
                 if result.is_err() && shown {

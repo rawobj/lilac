@@ -143,6 +143,7 @@ pub fn playlist_card(ix: usize, playlist: &Playlist, window: &Window, cx: &mut A
     );
     let subtitle = match playlist.description.as_ref().filter(|d| !d.is_empty()) {
         Some(description) => description.clone(),
+        None if playlist.owner.name().is_empty() => "Playlist".into(),
         None => format!("By {}", playlist.owner.name()).into(),
     };
     card(

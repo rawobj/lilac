@@ -14,9 +14,11 @@ use serde_json::{Value, json};
 use crate::model::{Playlist, Track};
 
 /// Older copies are not worth showing, even for a moment.
-const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
-/// Playlists kept in memory and on disk.
-const MAX: usize = 24;
+const TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Playlists kept on disk.
+const MAX: usize = 150;
+/// Playlists kept in memory; the disk has the rest.
+const IN_MEMORY: usize = 16;
 
 pub struct Cached {
     pub playlist: Playlist,
@@ -50,7 +52,7 @@ fn remember(id: &str, cached: Arc<Cached>) {
     let mut memory = memory().lock().unwrap();
     memory.retain(|(key, _)| key != id);
     memory.insert(0, (id.to_string(), cached));
-    memory.truncate(MAX);
+    memory.truncate(IN_MEMORY);
 }
 
 fn file(id: &str) -> Option<PathBuf> {

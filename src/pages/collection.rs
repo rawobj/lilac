@@ -118,14 +118,32 @@ impl CollectionPage {
         match self.source.clone() {
             Source::Liked => self.sync_liked(cx),
             Source::Album(id) => {
-                self.loading = true;
+                self.loading = self.tracks.is_empty();
                 cx.spawn(async move |this, cx| {
-                    let result = runtime::run(async move {
-                        let album = api.album(&id).await?;
-                        let tracks = api.album_tracks(&album).await?;
-                        Ok((album, tracks))
+                    // The kept copy at once, then Spotify's behind it.
+                    let (kept_api, kept_id) = (api.clone(), id.clone());
+                    let kept = runtime::run(async move { Ok(kept_api.album_kept(&kept_id).await) })
+                        .await
+                        .ok()
+                        .flatten();
+                    let recent = kept.as_ref().is_some_and(|(_, age)| *age < RECHECK_ON_OPEN);
+                    let shown = kept.is_some();
+                    this.update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return;
+                        }
+                        if let Some(((album, tracks), _)) = kept {
+                            this.loading = false;
+                            this.album = Some(album);
+                            this.set_tracks(tracks);
+                            cx.notify();
+                        }
                     })
-                    .await;
+                    .ok();
+                    if recent {
+                        return;
+                    }
+                    let result = runtime::run(async move { api.fetch_album(&id).await }).await;
                     this.update(cx, |this, cx| {
                         if this.generation != generation {
                             return;
@@ -133,10 +151,19 @@ impl CollectionPage {
                         this.loading = false;
                         match result {
                             Ok((album, tracks)) => {
-                                this.album = Some(album);
-                                this.set_tracks(tracks);
+                                if this.album.as_ref() != Some(&album) {
+                                    this.album = Some(album);
+                                }
+                                if tracks != this.tracks {
+                                    let scroll = this.list.logical_scroll_top();
+                                    this.set_tracks(tracks);
+                                    this.list.scroll_to(scroll);
+                                }
                             }
-                            Err(err) => this.error = Some(format!("{err}").into()),
+                            // A kept copy on screen stays; it is still right
+                            // as far as anyone knows.
+                            Err(err) if !shown => this.error = Some(format!("{err}").into()),
+                            Err(_) => {}
                         }
                         cx.notify();
                     })
@@ -204,7 +231,14 @@ impl CollectionPage {
                         return None;
                     }
                     let unchanged = match meta {
-                        Ok(playlist) => {
+                        Ok(mut playlist) => {
+                            // The session has no cover for playlists without
+                            // an uploaded picture; keep the one already shown.
+                            if playlist.images.is_empty()
+                                && let Some(shown) = &this.playlist
+                            {
+                                playlist.images = shown.images.clone();
+                            }
                             // The snapshot id changes with every edit; the
                             // streaming session's copies have none.
                             let same = showing
@@ -723,6 +757,10 @@ impl CollectionPage {
         }
     }
 }
+
+/// A kept album younger than this is not asked about again when opened,
+/// so going back and forth costs nothing.
+const RECHECK_ON_OPEN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 impl Render for CollectionPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
