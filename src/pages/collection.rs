@@ -8,6 +8,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app;
+use crate::images::ImageCache;
 use crate::library::{LibraryEvent, SavedEntity};
 use crate::menus::{self, TrackMenuContext};
 use crate::model::*;
@@ -551,10 +552,15 @@ impl CollectionPage {
             }
         };
 
+        // Albums and playlists take their colors from the cover (the
+        // backdrop behind the list, see `render`); others keep a tint.
+        let tinted = self.art_url().is_none() && !matches!(self.source, Source::Liked);
         div()
             .relative()
-            .h(px(288.0))
-            .child(div().absolute().size_full().bg(theme::hero_gradient(seed)))
+            .h(px(HERO_HEIGHT))
+            .when(tinted, |d| {
+                d.child(div().absolute().size_full().bg(theme::hero_gradient(seed)))
+            })
             .child(
                 div()
                     .relative()
@@ -758,15 +764,99 @@ impl CollectionPage {
     }
 }
 
+impl CollectionPage {
+    /// The cover the header's colors come from.
+    fn art_url(&self) -> Option<SharedString> {
+        match &self.source {
+            Source::Liked => None,
+            Source::Playlist(_) => self.playlist.as_ref()?.images.for_size(208),
+            Source::Album(_) => self.album.as_ref()?.images.for_size(208),
+        }
+    }
+
+    /// Behind the header: the cover blurred and washed in its main color,
+    /// which runs on behind the play buttons and fades out, as on artist
+    /// pages.
+    /// Moves with the list and is gone once the header has scrolled away.
+    fn backdrop(&self, cx: &mut App) -> Option<AnyElement> {
+        let top = self.list.logical_scroll_top();
+        if top.item_ix != 0 {
+            return None;
+        }
+        let scrolled = f32::from(top.offset_in_item);
+        let (color, image) = match &self.source {
+            Source::Liked => (theme::accent_strong(), None),
+            _ => {
+                let backdrop = ImageCache::backdrop(&self.art_url()?, cx)?;
+                (backdrop.glow, Some(backdrop.image))
+            }
+        };
+        // Dark enough for white text whatever the cover.
+        let color = Hsla {
+            l: color.l.min(0.36),
+            s: color.s.min(0.75),
+            a: 1.0,
+            ..color
+        };
+        let header = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(HERO_HEIGHT))
+            .children(image.map(|image| {
+                img(ImageSource::Render(image))
+                    .absolute()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+            }))
+            .child(div().absolute().size_full().bg(linear_gradient(
+                180.0,
+                linear_color_stop(color.opacity(0.45), 0.0),
+                linear_color_stop(color, 1.0),
+            )));
+        let spill = div()
+            .absolute()
+            .top(px(HERO_HEIGHT))
+            .left_0()
+            .right_0()
+            .h(px(SPILL_HEIGHT))
+            .bg(linear_gradient(
+                180.0,
+                linear_color_stop(color, 0.0),
+                linear_color_stop(color.opacity(0.0), 1.0),
+            ));
+        Some(
+            div()
+                .absolute()
+                .top(px(-scrolled))
+                .left_0()
+                .right_0()
+                .h(px(HERO_HEIGHT + SPILL_HEIGHT))
+                .overflow_hidden()
+                .child(header)
+                .child(spill)
+                .into_any_element(),
+        )
+    }
+}
+
 /// A kept album younger than this is not asked about again when opened,
 /// so going back and forth costs nothing.
 const RECHECK_ON_OPEN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Header height, and how far its color runs on below it: through the row
+/// of play buttons, ending before the track table.
+const HERO_HEIGHT: f32 = 288.0;
+const SPILL_HEIGHT: f32 = 76.0;
 
 impl Render for CollectionPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .relative()
             .size_full()
+            .overflow_hidden()
+            .children(self.backdrop(cx))
             .child(
                 list(
                     self.list.clone(),
