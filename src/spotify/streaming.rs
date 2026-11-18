@@ -41,6 +41,29 @@ pub fn set_session(session: Option<Session>) {
     slot().send_replace(session);
 }
 
+/// Connect a streaming session for reading only (artist details, lyrics,
+/// friend activity) when Soloist does the playing: no player and no
+/// Connect device, so Spotify lists Soloist alone. Becomes the session
+/// these reads use.
+pub async fn connect_session(token: String) -> Result<Session> {
+    let config = librespot_core::config::SessionConfig {
+        client_id: super::oauth::DESKTOP_CLIENT_ID.to_string(),
+        device_id: crate::paths::device_id(),
+        ..Default::default()
+    };
+    // No cache: credentials stay in Lilac's own store.
+    let session = Session::new(config, None);
+    session
+        .connect(
+            librespot_core::authentication::Credentials::with_access_token(token),
+            false,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("could not connect to Spotify: {e}"))?;
+    set_session(Some(session.clone()));
+    Ok(session)
+}
+
 /// The streaming session is not connected (yet); not a refusal.
 #[derive(Debug)]
 pub struct NoSession;

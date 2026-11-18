@@ -45,7 +45,6 @@ pub fn cache_dir() -> PathBuf {
 
 /// Data Lilac keeps but did not get from the user: `$XDG_DATA_HOME/lilac`
 /// or the platform's equivalent.
-#[cfg(windows)]
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -59,6 +58,11 @@ pub fn data_dir() -> PathBuf {
             }
         });
     base.join(APP_DIR)
+}
+
+/// The Soloist build Lilac downloaded, and its data directory.
+pub fn soloist_dir() -> PathBuf {
+    data_dir().join("soloist")
 }
 
 /// Playlists opened before (see `playlist_cache`).

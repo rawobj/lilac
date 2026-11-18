@@ -22,6 +22,28 @@ impl Quality {
     }
 }
 
+/// What plays audio on this computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// The built-in player, and Soloist while Spotify refuses it.
+    Automatic,
+    Builtin,
+    Soloist,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 3] = [Engine::Automatic, Engine::Builtin, Engine::Soloist];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::Automatic => "Automatic",
+            Engine::Builtin => "Built-in",
+            Engine::Soloist => "Soloist",
+        }
+    }
+}
+
 /// How the lyrics page looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +85,9 @@ pub struct Settings {
     pub lrclib_lyrics: bool,
     /// Release date of the newest What's New item the user has seen.
     pub whats_new_seen: String,
+    pub engine: Engine,
+    /// Replace the Soloist build before it expires.
+    pub soloist_auto_update: bool,
 }
 
 impl Default for Settings {
@@ -82,6 +107,8 @@ impl Default for Settings {
             media_keys: true,
             lrclib_lyrics: false,
             whats_new_seen: String::new(),
+            engine: Engine::Automatic,
+            soloist_auto_update: true,
         }
     }
 }

@@ -12,6 +12,7 @@ mod model;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod nav;
+mod notify;
 mod pages;
 mod panels;
 mod paths;
@@ -23,6 +24,7 @@ mod search;
 mod session;
 mod settings;
 mod single_instance;
+mod soloist;
 mod spotify;
 #[cfg(target_os = "linux")]
 mod system_volume;

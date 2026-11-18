@@ -112,12 +112,37 @@ pub fn toasts(cx: &mut App) -> Option<impl IntoElement + use<>> {
         .gap_2();
     for toast in &ui.toasts {
         let error = toast.kind == ToastKind::Error;
+        let id = toast.id;
+        let actions = toast
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(ix, (label, action))| {
+                let action = action.clone();
+                div()
+                    .id(("toast-action", id as usize * 4 + ix))
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::white(0.08)))
+                    .child(label.clone())
+                    .on_click(move |_, window, cx| {
+                        app::ui(cx).update(cx, |ui, cx| ui.dismiss_toast(id, cx));
+                        action(window, cx);
+                    })
+            });
         column = column.child(
             theme::popup()
-                .rounded_full()
+                .rounded(px(19.0))
                 .px_4()
-                .h(px(38.0))
-                .max_w(px(520.0))
+                .py_2()
+                .min_h(px(38.0))
+                .max_w(px(560.0))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -135,7 +160,14 @@ pub fn toasts(cx: &mut App) -> Option<impl IntoElement + use<>> {
                             theme::accent()
                         }),
                 )
-                .child(div().truncate().text_sm().child(toast.text.clone())),
+                .child(
+                    div()
+                        .min_w_0()
+                        .line_clamp(2)
+                        .text_sm()
+                        .child(toast.text.clone()),
+                )
+                .children(actions),
         );
     }
     Some(deferred(column).with_priority(3))
@@ -164,6 +196,7 @@ fn field(label: &'static str, state: &Entity<InputState>) -> Div {
 pub fn dialog(
     name: &Entity<InputState>,
     description: &Entity<InputState>,
+    soloist_key: &Entity<InputState>,
     scroll: &ScrollHandle,
     cx: &mut App,
 ) -> Option<impl IntoElement + use<>> {
@@ -279,6 +312,50 @@ pub fn dialog(
             }
             ("Keyboard shortcuts", grid.into_any_element(), None)
         }
+        Dialog::SoloistSetup => super::soloist_setup::render(soloist_key, cx),
+        Dialog::SoloistExpired => {
+            let soloist = app::soloist(cx).read(cx);
+            let (version, expired_on) = soloist
+                .installed()
+                .map(|b| (b.version.clone(), crate::soloist::date(b.expires_at())))
+                .unwrap_or_default();
+            let install = soloist.install.clone();
+            let busy = matches!(
+                install,
+                crate::soloist::Install::Downloading(..) | crate::soloist::Install::Unpacking
+            );
+            let progress = match install {
+                crate::soloist::Install::Downloading(got, total) => Some(match total {
+                    Some(total) if total > 0 => {
+                        format!("Downloading… {}%", got * 100 / total)
+                    }
+                    _ => format!("Downloading… {:.1} MB", got as f64 / 1e6),
+                }),
+                crate::soloist::Install::Unpacking => Some("Installing…".into()),
+                crate::soloist::Install::Failed(why) => Some(format!("Download failed: {why}")),
+                crate::soloist::Install::Idle => None,
+            };
+            (
+                "Soloist has expired",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .text_color(theme::text_muted())
+                    .child(format!(
+                        "Soloist {version} stopped working on {expired_on}. Spotify's Soloist builds run for 90 days; a newer build keeps Lilac playing."
+                    ))
+                    .children(progress.map(|p| div().text_color(theme::text()).child(p)))
+                    .into_any_element(),
+                (!busy).then(|| {
+                    ui::pill_button("confirm", "Download from Spotify", true)
+                        .on_click(|_, _, cx| {
+                            app::soloist(cx).update(cx, |s, cx| s.install(cx));
+                        })
+                        .into_any_element()
+                }),
+            )
+        }
         Dialog::About => (
             "About Lilac",
             div()
@@ -302,10 +379,12 @@ pub fn dialog(
     };
 
     let has_confirm = confirm.is_some();
+    let shown = app::ui(cx).read(cx).dialog.clone();
+    let wide = matches!(shown, Some(Dialog::SoloistSetup));
     let panel = theme::popup()
         .id("dialog")
-        .w(px(440.0))
-        .max_h(px(560.0))
+        .w(px(if wide { 500.0 } else { 440.0 }))
+        .max_h(px(if wide { 760.0 } else { 560.0 }))
         .overflow_y_scroll()
         .restrict_scroll_to_axis()
         .p_6()

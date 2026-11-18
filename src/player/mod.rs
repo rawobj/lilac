@@ -20,7 +20,8 @@ use crate::app;
 use crate::model::{AlbumRef, ArtistRef, ContextUri, Images, ItemKind, ShowRef, Track};
 use crate::runtime;
 use crate::session::{Session, SessionEvent};
-use crate::settings::Settings;
+use crate::settings::{Engine, Settings};
+use serde_json::{Value, json};
 
 use backend::{Backend, Channels, Cluster, EngineEvent, Options, Start};
 pub use backend::{Device, DeviceKind};
@@ -115,6 +116,16 @@ pub struct Player {
     halted: bool,
     ticker: Option<Task<()>>,
     backend: Option<Backend>,
+    /// The built-in player stays off the network for now (while Soloist
+    /// pairs, so a phone lists one Lilac to pick, not two).
+    builtin_hidden: bool,
+    /// When Lilac last started something on Soloist; a pause Soloist
+    /// reports right after that was not asked for.
+    soloist_started_at: Option<Instant>,
+    /// The read-only session used instead of the built-in player while
+    /// Soloist plays (see `soloist_only`).
+    reader: Option<librespot_core::session::Session>,
+    reader_starting: Option<Task<()>>,
     /// The streaming session is being set up.
     starting: Option<Task<()>>,
     pending: Option<PendingLoad>,
@@ -137,12 +148,9 @@ pub struct Player {
     restore: Option<Task<()>>,
     /// Play was pressed while the last session was still on its way here.
     play_when_ready: bool,
-    restore_lookup: Option<
-        tokio::task::JoinHandle<(
-            Option<crate::model::RemoteState>,
-            Option<crate::model::PlayedItem>,
-        )>,
-    >,
+    /// Where to go once Soloist plays this track (it starts at 0).
+    seek_when_playing: Option<(String, u32)>,
+    restore_lookup: Option<tokio::task::JoinHandle<RestoreLookup>>,
     queue_refresh: Option<Task<()>>,
     /// Track URIs of the list we started when it has no context URI, in
     /// order: kept with the session and used to load a track again.
@@ -190,8 +198,8 @@ impl Player {
         .detach();
 
         // Remember the position on the way out; it is the one that matters.
-        cx.on_app_quit(|this, _| {
-            this.save_session();
+        cx.on_app_quit(|this, cx| {
+            this.save_session(cx);
             async {}
         })
         .detach();
@@ -238,6 +246,10 @@ impl Player {
             halted: false,
             ticker: None,
             backend: None,
+            builtin_hidden: false,
+            soloist_started_at: None,
+            reader: None,
+            reader_starting: None,
             starting: None,
             pending: None,
             listeners: Vec::new(),
@@ -253,6 +265,7 @@ impl Player {
             warmup: Warmup::Idle,
             restore: None,
             play_when_ready: false,
+            seek_when_playing: None,
             restore_lookup: None,
             queue_refresh: None,
             started_tracks: Vec::new(),
@@ -339,6 +352,143 @@ impl Player {
         self.backend.is_some() || self.starting.is_some()
     }
 
+    /// Spotify refuses the built-in player and Soloist is not set up yet:
+    /// playing here can only fail, so it is not tried. Play buttons open
+    /// the setup instead. Another device playing is unaffected.
+    pub fn locked(&self, cx: &App) -> bool {
+        if self.simulated(cx) || self.remote_device().is_some() {
+            return false;
+        }
+        let soloist = app::soloist(cx).read(cx);
+        soloist.builtin_refused() && !soloist.usable()
+    }
+
+    /// Soloist is the engine: the built-in player (and its Connect device)
+    /// is not started at all, so Spotify lists one Lilac, the one playing.
+    fn soloist_only(&self, cx: &App) -> bool {
+        !self.simulated(cx)
+            && app::settings(cx).read(cx).engine == Engine::Soloist
+            && app::soloist(cx).read(cx).usable()
+    }
+
+    /// Spotify refused the built-in player and Soloist is set up: make
+    /// Soloist the engine from now on (Settings can switch back).
+    pub fn prefer_soloist(cx: &mut App) {
+        let soloist = app::soloist(cx).read(cx);
+        if soloist.usable()
+            && soloist.builtin_refused()
+            && app::settings(cx).read(cx).engine == Engine::Automatic
+        {
+            app::update_settings(cx, |s| s.engine = Engine::Soloist);
+        }
+    }
+
+    /// The engine setting changed: run the engine it names.
+    pub fn apply_engine(&mut self, cx: &mut Context<Self>) {
+        let session = app::session(cx).read(cx);
+        if session.is_demo() || !session.streaming.has_credentials() {
+            return;
+        }
+        if self.soloist_only(cx) {
+            self.drop_backend();
+        } else {
+            self.reader = None;
+            self.reader_starting = None;
+        }
+        self.ensure_backend(cx);
+        cx.notify();
+    }
+
+    /// Connect the read-only session, then bring back the last session
+    /// (on Soloist) as the built-in player would.
+    fn ensure_reader(&mut self, cx: &mut Context<Self>) {
+        if self.reader.is_some() || self.reader_starting.is_some() {
+            return;
+        }
+        let auth = app::session(cx).read(cx).streaming.clone();
+        // On Soloist, Lilac's own record (`LastSession`, written from
+        // Soloist's state) says where the user left off, and Soloist
+        // reports itself once running: Spotify's Web API need not be asked.
+        // Something playing on another device shows once that device
+        // changes (the cluster) or the device list is opened.
+        // What other devices play is only Spotify's to say; that one Web
+        // API request stays. Where the user left off here is Lilac's own
+        // record on Soloist, so the last played track is not asked.
+        let api = app::api(cx);
+        let soloist = self.plays_on_soloist(cx);
+        self.restore_lookup = Some(runtime::spawn(async move {
+            if soloist {
+                let state = api.remote_state().await.map_err(|e| format!("{e:#}"));
+                (state, None)
+            } else {
+                let (state, last) = tokio::join!(api.remote_state(), api.last_played());
+                (state.map_err(|e| format!("{e:#}")), last.ok().flatten())
+            }
+        }));
+        let connect = runtime::spawn(async move {
+            let token = auth.token().await?;
+            crate::spotify::streaming::connect_session(token).await
+        });
+        self.reader_starting = Some(cx.spawn(async move |this, cx| {
+            let result = connect
+                .await
+                .unwrap_or_else(|err| Err(anyhow::anyhow!("background task failed: {err}")));
+            this.update(cx, |this, cx| {
+                this.reader_starting = None;
+                match result {
+                    Ok(session) => this.reader = Some(session),
+                    Err(err) => app::toast_error(format!("{err:#}"), cx),
+                }
+                // The device list is the Web API's; on Soloist it is read
+                // when the Devices panel opens.
+                if !this.plays_on_soloist(cx) {
+                    this.refresh_devices(Duration::from_millis(500), cx);
+                }
+                this.restore_session(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// When locked, open the setup and say so: the caller must not play.
+    fn setup_instead(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.locked(cx) {
+            return false;
+        }
+        cx.defer(crate::soloist::Soloist::open_setup);
+        true
+    }
+
+    /// Keep the built-in player off Spotify's device list, or bring it back.
+    pub fn hide_builtin(&mut self, hide: bool, cx: &mut Context<Self>) {
+        if self.builtin_hidden == hide {
+            return;
+        }
+        self.builtin_hidden = hide;
+        if hide {
+            self.drop_backend();
+            self.devices
+                .retain(|d| d.name != crate::soloist::DEVICE_NAME);
+        } else {
+            let session = app::session(cx).read(cx);
+            if !session.is_demo() && session.streaming.has_credentials() {
+                self.ensure_backend(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Spotify may hand out keys again: forget the refusal and let the
+    /// built-in player try.
+    pub fn retry_builtin(&mut self, cx: &mut Context<Self>) {
+        app::soloist(cx).update(cx, |s, cx| s.forget_builtin_refused(cx));
+        self.halted = false;
+        self.failed_in_row = 0;
+        cx.emit(PlayerEvent::StateChanged);
+        self.resume(cx);
+    }
+
     // ----------------------------------------------------------------- commands
 
     /// Play `tracks` as a context, starting at `index`.
@@ -366,6 +516,9 @@ impl Player {
             return;
         }
 
+        if self.setup_instead(cx) {
+            return;
+        }
         let Some(first) = tracks.get(index).cloned() else {
             app::toast("Nothing to play here", cx);
             return;
@@ -397,12 +550,27 @@ impl Player {
         cx.emit(PlayerEvent::TrackChanged);
         cx.notify();
 
+        // Soloist playing (or meant to play) is told directly; checked
+        // before other devices, which Soloist also counts as once active.
+        let elsewhere = self.remote_device().is_some() && !self.soloist_active(cx);
+        if !elsewhere && (self.soloist_active(cx) || self.plays_on_soloist(cx)) {
+            let offset = match &start {
+                Start::Uri(uri) => Some(uri.clone()),
+                Start::Index(ix) => uris.get(*ix as usize).cloned(),
+            };
+            self.started_tracks = uris.clone();
+            self.play_on_soloist(context_uri, uris, offset, 0, cx);
+            return;
+        }
         if self.remote_device().is_some() {
             let api = app::api(cx);
             let offset = match &start {
                 Start::Uri(uri) => Some(uri.clone()),
                 Start::Index(ix) => uris.get(*ix as usize).cloned(),
             };
+            // Spotify takes no starting track for an artist context; send
+            // the tracks themselves.
+            let context_uri = remote_context(context_uri);
             let tracks = context_uri.is_none().then_some(uris);
             remote(cx, async move {
                 api.remote_play(
@@ -438,6 +606,7 @@ impl Player {
         {
             self.warmup = Warmup::Connecting;
             self.show_saved_session(cx);
+            Self::prefer_soloist(cx);
             self.ensure_backend(cx);
         }
     }
@@ -452,6 +621,9 @@ impl Player {
         if let Some(track) = saved.track() {
             self.current = Some(track);
             self.playing = false;
+            // Play picks up in the same list, at the same place.
+            self.connect_context = saved.context_uri.clone();
+            self.started_tracks = saved.tracks.clone();
             self.anchor(saved.position_ms);
             cx.emit(PlayerEvent::TrackChanged);
             cx.notify();
@@ -477,8 +649,20 @@ impl Player {
         let lookup = self.restore_lookup.take();
         self.restore = Some(cx.spawn(async move |this, cx| {
             let (state, last) = match lookup {
-                Some(lookup) => lookup.await.unwrap_or((None, None)),
-                None => (None, None),
+                Some(lookup) => lookup.await.unwrap_or((Ok(None), None)),
+                None => (Ok(None), None),
+            };
+            let state = match state {
+                Ok(state) => state,
+                Err(err) => {
+                    cx.update(|cx| {
+                        app::toast_error(
+                            format!("Couldn't retrieve what your devices are playing: {err}"),
+                            cx,
+                        )
+                    });
+                    None
+                }
             };
             let restoring = this
                 .update(cx, |this, cx| this.start_restore(state, last, cx))
@@ -524,18 +708,44 @@ impl Player {
             Some((i.item?, context, played_at))
         });
         let ours = self.device_id().map(str::to_string);
-        if self.backend().is_none() {
+        if self.backend().is_none() && !self.plays_on_soloist(cx) {
             return false;
         }
         if let Some(state) = state.filter(|s| s.item.is_some()) {
             let device = state.device.as_ref().and_then(|d| d.id.clone());
             if state.is_playing && device != ours {
                 // Show what the other device plays; the controls drive it.
+                // It must be in the list for that (which is not read at
+                // start-up on Soloist).
+                if let Some(remote) = &state.device
+                    && let Some(id) = remote.id.clone()
+                    && !self.devices.iter().any(|d| d.id == id)
+                {
+                    self.devices.push(Device {
+                        id,
+                        name: remote.name.clone(),
+                        kind: device_kind(&remote.kind),
+                    });
+                }
                 self.active_device = device;
                 self.current = state.item;
                 self.playing = true;
                 self.anchor(state.progress_ms.unwrap_or(0));
                 cx.emit(PlayerEvent::TrackChanged);
+                return false;
+            }
+            if self.plays_on_soloist(cx) || self.locked(cx) {
+                // Bringing it to the built-in player would only ask Spotify
+                // for keys it refuses; Play starts it on Soloist (or opens
+                // its setup).
+                self.current = state.item;
+                self.playing = false;
+                self.connect_context = state.context.map(|c| c.uri).filter(|u| !u.is_empty());
+                self.anchor(state.progress_ms.unwrap_or(0));
+                cx.emit(PlayerEvent::TrackChanged);
+                if self.plays_on_soloist(cx) {
+                    app::soloist(cx).update(cx, |s, cx| s.start(cx));
+                }
                 return false;
             }
             // Another device holds a paused session: bring it here, paused.
@@ -553,6 +763,16 @@ impl Player {
             }
         }
 
+        if self.locked(cx) {
+            // What was saved is on screen already (`show_saved_session`).
+            return false;
+        }
+        if self.plays_on_soloist(cx) {
+            // What was saved is on screen already (`show_saved_session`);
+            // have Soloist up by the time Play is pressed.
+            app::soloist(cx).update(cx, |s, cx| s.start(cx));
+            return false;
+        }
         // Our own record is exact (position included) unless something was
         // played elsewhere after it was written. Spotify lists a track as
         // played only after about 30 seconds, so the same track counts too.
@@ -613,11 +833,17 @@ impl Player {
     }
 
     /// Remember what plays and where, for the next start.
-    fn save_session(&self) {
-        let (Some(_), Some(track)) = (&self.backend, &self.current) else {
+    fn save_session(&self, cx: &App) {
+        let Some(track) = &self.current else {
             return;
         };
-        if self.remote_device().is_some() {
+        // What this computer plays: the built-in player, or Soloist.
+        let here = if self.soloist_active(cx) {
+            true
+        } else {
+            self.backend.is_some() && self.remote_device().is_none()
+        };
+        if !here {
             return;
         }
         LastSession::new(
@@ -635,7 +861,7 @@ impl Player {
     /// Preloading the last played track opens them, and makes picking up
     /// where the user left off start at once.
     fn warm_up(&mut self, cx: &mut Context<Self>) {
-        if self.current.is_some() {
+        if self.current.is_some() || self.plays_on_soloist(cx) || self.locked(cx) {
             return;
         }
         let api = app::api(cx);
@@ -721,6 +947,8 @@ impl Player {
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
+        // A pause the user asks for is meant.
+        self.soloist_started_at = None;
         if self.heard().is_some() {
             // Shown as paused when the speaker goes quiet (`on_cue`).
             if let Some(backend) = self.backend() {
@@ -741,8 +969,10 @@ impl Player {
         self.playing = false;
         self.ticker = None;
         if self.remote_device().is_some() {
-            let api = app::api(cx);
-            remote(cx, async move { api.remote_pause().await });
+            if !self.soloist_command("pause", Value::Null, cx) {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_pause().await });
+            }
         } else if let Some(backend) = self.backend() {
             backend.pause();
         } else if let Some(pending) = self.pending.take() {
@@ -754,7 +984,22 @@ impl Player {
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
-        if self.playing || self.current.is_none() {
+        if self.playing || self.current.is_none() || self.setup_instead(cx) {
+            return;
+        }
+        if self.remote_device().is_none()
+            && self.plays_on_soloist(cx)
+            && let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string())
+        {
+            // Nothing plays yet: start where we were, on Soloist.
+            let context = self.connect_context.clone();
+            let tracks = if self.started_tracks.contains(&uri) {
+                self.started_tracks.clone()
+            } else {
+                vec![uri.clone()]
+            };
+            let position = self.position_ms();
+            self.play_on_soloist(context, tracks, Some(uri), position, cx);
             return;
         }
         if (self.starting.is_some() || self.restore.is_some()) && self.remote_device().is_none() {
@@ -783,10 +1028,12 @@ impl Player {
         if self.simulated(cx) {
             self.start_ticker(cx);
         } else if self.remote_device().is_some() {
-            let api = app::api(cx);
-            remote(cx, async move {
-                api.remote_play(None, None, None, None, 0).await
-            });
+            if !self.soloist_command("play", Value::Null, cx) {
+                let api = app::api(cx);
+                remote(cx, async move {
+                    api.remote_play(None, None, None, None, 0).await
+                });
+            }
         } else if let Some(backend) = self.backend() {
             // Spotify forgets the active device after a while paused, and
             // librespot ignores Play until it is active again.
@@ -835,6 +1082,9 @@ impl Player {
 
     pub fn next(&mut self, cx: &mut Context<Self>) {
         self.retry = None;
+        if self.setup_instead(cx) {
+            return;
+        }
         if self.simulated(cx) {
             // An explicit skip leaves "repeat one" for the next track, like the official clients.
             let repeat = if self.repeat == Repeat::Track {
@@ -847,8 +1097,10 @@ impl Player {
                 None => self.finish(cx),
             }
         } else if self.remote_device().is_some() {
-            let api = app::api(cx);
-            remote(cx, async move { api.remote_next().await });
+            if !self.soloist_command("skip_next", Value::Null, cx) {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_next().await });
+            }
         } else if let Some(backend) = self.backend() {
             backend.next();
         }
@@ -856,11 +1108,16 @@ impl Player {
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
         self.retry = None;
+        if self.setup_instead(cx) {
+            return;
+        }
         if !self.simulated(cx) {
             // Spotify restarts the track or goes back itself, by the same rule.
             if self.remote_device().is_some() {
-                let api = app::api(cx);
-                remote(cx, async move { api.remote_previous().await });
+                if !self.soloist_command("skip_prev", Value::Null, cx) {
+                    let api = app::api(cx);
+                    remote(cx, async move { api.remote_previous().await });
+                }
             } else if let Some(backend) = self.backend() {
                 backend.previous();
             }
@@ -926,8 +1183,10 @@ impl Player {
             self.anchor(position_ms);
         }
         if self.remote_device().is_some() {
-            let api = app::api(cx);
-            remote(cx, async move { api.remote_seek(position_ms).await });
+            if !self.soloist_command("seek", json!({ "position_ms": position_ms }), cx) {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_seek(position_ms).await });
+            }
         } else if let Some(backend) = self.backend() {
             backend.seek(position_ms);
         }
@@ -974,8 +1233,10 @@ impl Player {
         } else {
             self.connect_shuffle = on;
             if self.remote_device().is_some() {
-                let api = app::api(cx);
-                remote(cx, async move { api.remote_shuffle(on).await });
+                if !self.soloist_command("set_shuffle", json!({ "enabled": on }), cx) {
+                    let api = app::api(cx);
+                    remote(cx, async move { api.remote_shuffle(on).await });
+                }
             } else if let Some(backend) = self.backend() {
                 backend.set_shuffle(on);
             }
@@ -986,7 +1247,17 @@ impl Player {
     pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
         self.repeat = self.repeat.next();
         let repeat = self.repeat;
-        if self.remote_device().is_some() {
+        // Soloist has a switch for each kind; the one being turned off goes
+        // first, as its documentation orders them.
+        let (track, context) = (repeat == Repeat::Track, repeat == Repeat::Context);
+        let soloist = if track {
+            self.soloist_command("set_repeat_context", json!({ "enabled": false }), cx)
+                && self.soloist_command("set_repeat_track", json!({ "enabled": true }), cx)
+        } else {
+            self.soloist_command("set_repeat_track", json!({ "enabled": false }), cx)
+                && self.soloist_command("set_repeat_context", json!({ "enabled": context }), cx)
+        };
+        if !soloist && self.remote_device().is_some() {
             let api = app::api(cx);
             let state = match repeat {
                 Repeat::Off => "off",
@@ -994,7 +1265,7 @@ impl Player {
                 Repeat::Track => "track",
             };
             remote(cx, async move { api.remote_repeat(state).await });
-        } else if let Some(backend) = self.backend() {
+        } else if !soloist && let Some(backend) = self.backend() {
             backend.set_repeat(repeat != Repeat::Off, repeat == Repeat::Track);
         }
         cx.notify();
@@ -1020,6 +1291,10 @@ impl Player {
         if !self.simulated(cx) {
             // Spotify plays queued tracks before the rest of the context, in
             // the order they were added; there is no separate "play next".
+            if self.soloist_command("add_to_queue", json!({ "uri": track.uri.as_ref() }), cx) {
+                app::toast("Added to queue", cx);
+                return;
+            }
             let api = app::api(cx);
             let uri = track.uri.to_string();
             cx.spawn(async move |_, cx| {
@@ -1260,9 +1535,11 @@ impl Player {
         let volume = self.volume;
         app::update_settings(cx, |settings| settings.volume = volume);
         if self.remote_device().is_some() {
-            let api = app::api(cx);
             let percent = (self.effective_volume() * 100.0).round() as u32;
-            remote(cx, async move { api.remote_volume(percent).await });
+            if !self.soloist_command("set_volume", json!({ "volume": percent }), cx) {
+                let api = app::api(cx);
+                remote(cx, async move { api.remote_volume(percent).await });
+            }
         } else if let Some(backend) = self.backend() {
             backend.set_volume(self.effective_volume());
         }
@@ -1270,7 +1547,11 @@ impl Player {
 
     /// Connect the streaming session in the background, then run any pending load.
     fn ensure_backend(&mut self, cx: &mut Context<Self>) {
-        if self.backend.is_some() || self.starting.is_some() {
+        if self.soloist_only(cx) {
+            self.ensure_reader(cx);
+            return;
+        }
+        if self.backend.is_some() || self.starting.is_some() || self.builtin_hidden {
             return;
         }
         let options = Options::from_settings(app::settings(cx).read(cx));
@@ -1280,7 +1561,7 @@ impl Player {
         let api = app::api(cx);
         self.restore_lookup = Some(runtime::spawn(async move {
             let (state, last) = tokio::join!(api.remote_state(), api.last_played());
-            (state.ok().flatten(), last.ok().flatten())
+            (state.map_err(|e| format!("{e:#}")), last.ok().flatten())
         }));
         // Spawned here rather than inside the UI task: that is first polled
         // only after the window is up, and connecting need not wait for it.
@@ -1418,13 +1699,13 @@ impl Player {
                     self.loading = false;
                     self.resume(cx);
                 }
-                self.save_session();
+                self.save_session(cx);
                 cx.emit(PlayerEvent::StateChanged);
                 cx.notify();
             }
             EngineEvent::Seeked { position_ms, .. } => {
                 self.anchor_reported(position_ms);
-                self.save_session();
+                self.save_session(cx);
                 cx.notify();
             }
             EngineEvent::PositionCorrection { position_ms, .. }
@@ -1533,6 +1814,8 @@ impl Player {
 
     /// Stop librespot from skipping on through tracks that will not load.
     fn halt(&mut self, cx: &mut Context<Self>) {
+        // Whether someone is waiting for sound, rather than a quiet restore.
+        let wanted = self.loading || self.play_when_ready;
         if let Some(backend) = self.backend() {
             backend.stop();
         }
@@ -1543,12 +1826,287 @@ impl Player {
         self.loading = false;
         self.playing = false;
         self.play_when_ready = false;
-        app::toast_error(
-            "Spotify isn't handing out audio right now. Try again in a few minutes.",
-            cx,
-        );
         cx.emit(PlayerEvent::StateChanged);
         cx.notify();
+
+        let soloist = app::soloist(cx);
+        soloist.update(cx, |s, cx| s.record_builtin_refused(cx));
+        let engine = app::settings(cx).read(cx).engine;
+        let uri = self.current.as_ref().map(|t| t.uri.to_string());
+        if engine != Engine::Builtin
+            && soloist.read(cx).usable()
+            && let Some(uri) = uri
+        {
+            // From now on Soloist plays and the built-in player stays off.
+            Self::prefer_soloist(cx);
+            let player = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                player.update(cx, |p, cx| p.apply_engine(cx)).ok();
+            });
+            app::toast(
+                "Spotify refused the built-in player; playing through Soloist",
+                cx,
+            );
+            let context = self.connect_context.clone();
+            let tracks = if self.started_tracks.contains(&uri) {
+                self.started_tracks.clone()
+            } else {
+                vec![uri.clone()]
+            };
+            self.play_on_soloist(context, tracks, Some(uri), 0, cx);
+            return;
+        }
+        // Locked now: the banner says so; someone pressing Play gets the
+        // setup at once.
+        if wanted {
+            cx.defer(crate::soloist::Soloist::open_setup);
+        }
+    }
+
+    /// Play the current track through Soloist, where it is (used when the
+    /// setup finishes).
+    pub fn play_here_on_soloist(&mut self, cx: &mut Context<Self>) {
+        let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string()) else {
+            return;
+        };
+        let context = self.connect_context.clone();
+        let tracks = if self.started_tracks.contains(&uri) {
+            self.started_tracks.clone()
+        } else {
+            vec![uri.clone()]
+        };
+        let position = if self.halted { 0 } else { self.position_ms() };
+        if let Some(backend) = self.backend() {
+            backend.stop();
+        }
+        self.play_on_soloist(context, tracks, Some(uri), position, cx);
+    }
+
+    /// Whether this computer plays through Soloist rather than the
+    /// built-in player.
+    fn plays_on_soloist(&self, cx: &App) -> bool {
+        if self.simulated(cx) {
+            return false;
+        }
+        let soloist = app::soloist(cx).read(cx);
+        soloist.usable()
+            && match app::settings(cx).read(cx).engine {
+                Engine::Soloist => true,
+                Engine::Builtin => false,
+                Engine::Automatic => soloist.builtin_refused(),
+            }
+    }
+
+    /// Play on Soloist, starting it first if it is not up.
+    fn play_on_soloist(
+        &mut self,
+        context: Option<String>,
+        tracks: Vec<String>,
+        offset: Option<String>,
+        position_ms: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let context = remote_context(context);
+        self.soloist_started_at = Some(Instant::now());
+        self.halted = false;
+        self.loading = true;
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
+        let api = app::api(cx);
+        let player = cx.entity().downgrade();
+        app::soloist(cx).update(cx, |soloist, cx| {
+            soloist.when_ready(
+                move |device_id, cx| {
+                    if let Some(player) = player.upgrade() {
+                        player.update(cx, |p, cx| {
+                            // Soloist is the device playing from here on;
+                            // the controls follow it.
+                            if !p.devices.iter().any(|d| d.id == device_id) {
+                                p.devices.push(Device {
+                                    id: device_id.clone(),
+                                    name: crate::soloist::DEVICE_NAME.into(),
+                                    kind: DeviceKind::Computer,
+                                });
+                            }
+                            p.active_device = Some(device_id.clone());
+                            cx.notify();
+                        });
+                    }
+                    // Soloist is told directly for a list from its start (it
+                    // plays the album or playlist itself), and while Spotify
+                    // does not list it yet. Only Spotify can start a list
+                    // part-way; Soloist alone plays that track and queues
+                    // the rest.
+                    let from_top = context.is_some()
+                        && offset.as_ref().is_none_or(|o| tracks.first() == Some(o));
+                    if from_top || device_id == crate::soloist::LOCAL_DEVICE {
+                        // Soloist starts a URI at its beginning; the place
+                        // is sought once that track plays.
+                        if position_ms > 0
+                            && let (Some(player), Some(uri)) = (player.upgrade(), offset.clone())
+                        {
+                            player
+                                .update(cx, |p, _| p.seek_when_playing = Some((uri, position_ms)));
+                        }
+                        play_locally(context.as_deref(), &tracks, offset.as_deref(), cx);
+                        return;
+                    }
+                    let local_tracks = tracks.clone();
+                    let local_context = context.clone();
+                    let local_offset = offset.clone();
+                    let tracks = context.is_none().then_some(tracks);
+                    cx.spawn(async move |cx| {
+                        let call = async move {
+                            api.remote_play(
+                                Some(&device_id),
+                                context.as_deref(),
+                                tracks.as_deref(),
+                                offset.as_deref(),
+                                position_ms,
+                            )
+                            .await
+                        };
+                        if runtime::run(call).await.is_err() {
+                            cx.update(|cx| {
+                                play_locally(
+                                    local_context.as_deref(),
+                                    &local_tracks,
+                                    local_offset.as_deref(),
+                                    cx,
+                                )
+                            });
+                        }
+                    })
+                    .detach();
+                },
+                cx,
+            )
+        });
+    }
+
+    /// Spotify listed Soloist: swap its stand-in id for the real one.
+    pub fn soloist_id_known(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.active_device.as_deref() == Some(crate::soloist::LOCAL_DEVICE) {
+            self.active_device = Some(id.clone());
+        }
+        for device in &mut self.devices {
+            if device.id == crate::soloist::LOCAL_DEVICE {
+                device.id = id.clone();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Soloist's own report of what it plays. While Soloist is the device
+    /// playing, this is what the controls show: no lookup, no waiting for
+    /// Spotify, and no guess left hanging when changes come fast.
+    pub fn on_soloist_state(&mut self, state: crate::soloist::ws::State, cx: &mut Context<Self>) {
+        let Some(device) = app::soloist(cx).read(cx).device_id.clone() else {
+            return;
+        };
+        if !state.is_active {
+            // Another device took over; the cluster tells about that one.
+            return;
+        }
+        self.active_device = Some(device);
+        self.halted = false;
+        self.play_when_ready = false;
+        // Something (a session handover at start-up) can pause Soloist a
+        // moment after Lilac started it; nobody asked for that pause.
+        if state.status == "paused"
+            && self
+                .soloist_started_at
+                .take()
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(4))
+            && self.soloist_command("play", Value::Null, cx)
+        {
+            return;
+        }
+        self.playing = state.status == "playing";
+        self.loading = state.status == "buffering";
+        if self.playing
+            && let Some((uri, position_ms)) = self.seek_when_playing.take()
+        {
+            let playing = state.track.as_ref().and_then(|t| t["uri"].as_str());
+            if playing == Some(uri.as_str()) {
+                self.soloist_command("seek", json!({ "position_ms": position_ms }), cx);
+            }
+        }
+        self.connect_shuffle = state.shuffle;
+        self.repeat = match state.repeat.as_str() {
+            "track" => Repeat::Track,
+            "context" => Repeat::Context,
+            _ => Repeat::Off,
+        };
+        if let Some(context) = state.context_uri.filter(|c| !c.is_empty()) {
+            self.connect_context = Some(context);
+        }
+        self.anchor(state.position.at(unix_ms()) as u32);
+        let track: Option<Track> = state.track.and_then(|t| serde_json::from_value(t).ok());
+        match track {
+            Some(track) if self.current.as_ref().is_none_or(|c| c.uri != track.uri) => {
+                // Shown at once; the Web API's copy follows, with names in
+                // the user's language (Soloist's are untranslated).
+                let (uri, duration) = (track.uri.to_string(), track.duration_ms);
+                self.current = Some(track);
+                cx.emit(PlayerEvent::TrackChanged);
+                self.look_up_current(uri, duration, cx);
+                self.refresh_queue(cx);
+            }
+            _ => cx.emit(PlayerEvent::StateChanged),
+        }
+        // Lilac's own record of what played, so a restart can show it
+        // without asking Spotify.
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    pub fn on_soloist_position(
+        &mut self,
+        position: crate::soloist::ws::Position,
+        cx: &mut Context<Self>,
+    ) {
+        let soloist = app::soloist(cx).read(cx);
+        if !self
+            .active_device
+            .as_deref()
+            .is_some_and(|d| soloist.is_device(d))
+        {
+            return;
+        }
+        self.anchor(position.at(unix_ms()) as u32);
+        cx.emit(PlayerEvent::Seeked);
+        cx.notify();
+    }
+
+    /// Soloist's queue: what plays after the current track.
+    pub fn on_soloist_queue(&mut self, upcoming: Vec<Value>, cx: &mut Context<Self>) {
+        if !self.soloist_active(cx) {
+            return;
+        }
+        let upcoming: Vec<Track> = upcoming
+            .into_iter()
+            .filter_map(|t| serde_json::from_value(t).ok())
+            .collect();
+        self.queue = Queue::mirror(self.current.clone(), upcoming);
+        cx.notify();
+    }
+
+    /// Soloist is the device playing.
+    fn soloist_active(&self, cx: &App) -> bool {
+        self.active_device
+            .as_deref()
+            .is_some_and(|d| app::soloist(cx).read(cx).is_device(d))
+    }
+
+    /// Send a transport command straight to Soloist when it is the device
+    /// playing: no round trip through Spotify. False when it is not.
+    fn soloist_command(&self, name: &str, fields: Value, cx: &App) -> bool {
+        let Some(active) = self.active_device.as_deref() else {
+            return false;
+        };
+        let soloist = app::soloist(cx).read(cx);
+        soloist.is_device(active) && soloist.command(name, fields)
     }
 
     /// Load `uri` again in the context it failed in (librespot has moved on
@@ -1604,7 +2162,7 @@ impl Player {
             .cloned();
         self.current = Some(known.unwrap_or_else(|| track_from_audio_item(audio_item)));
         self.anchor(0);
-        self.save_session();
+        self.save_session(cx);
         // Spotify does not push our own changes; read what comes next.
         self.refresh_queue(cx);
         cx.emit(PlayerEvent::TrackChanged);
@@ -1677,7 +2235,7 @@ impl Player {
     /// through the cluster, but Spotify never pushes the state we caused,
     /// and nothing at all until some other device changes.
     pub fn refresh_devices(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if self.backend.is_none() {
+        if self.backend.is_none() && self.reader.is_none() {
             return;
         }
         let api = app::api(cx);
@@ -1695,13 +2253,7 @@ impl Player {
                         Some(Device {
                             id: d.id.clone()?,
                             name: d.name.clone(),
-                            kind: match d.kind.to_ascii_lowercase().as_str() {
-                                "computer" => DeviceKind::Computer,
-                                "smartphone" | "tablet" => DeviceKind::Phone,
-                                "speaker" | "avr" | "stb" | "audiodongle" => DeviceKind::Speaker,
-                                "tv" | "castvideo" => DeviceKind::Tv,
-                                _ => DeviceKind::Other,
-                            },
+                            kind: device_kind(&d.kind),
                         })
                     })
                     .collect();
@@ -1768,6 +2320,11 @@ impl Player {
             let lookup_uri = uri.clone();
             let result = runtime::run(async move { api.item(&lookup_uri).await }).await;
             this.update(cx, |this, cx| {
+                let shown = this.current.as_ref().is_some_and(|t| t.uri.as_ref() == uri);
+                if result.is_err() && shown {
+                    // What is shown already (from Soloist) beats a blank.
+                    return;
+                }
                 let mut track = result.unwrap_or_else(|_| Track {
                     uri: uri.clone().into(),
                     id: uri
@@ -1791,6 +2348,10 @@ impl Player {
 
     /// Rebuild the mirrored "Next up" list from Spotify's queue.
     fn refresh_queue(&mut self, cx: &mut Context<Self>) {
+        // Soloist answers with a queue_changed event (`on_soloist_queue`).
+        if self.soloist_command("get_queue", json!({ "limit": QUEUE_SHOWN }), cx) {
+            return;
+        }
         let api = app::api(cx);
         self.queue_refresh = Some(cx.spawn(async move |this, cx| {
             // The Web API learns about a track change seconds after the
@@ -1837,6 +2398,26 @@ impl Player {
         cx.notify();
     }
 }
+
+fn device_kind(kind: &str) -> DeviceKind {
+    match kind.to_ascii_lowercase().as_str() {
+        "computer" => DeviceKind::Computer,
+        "smartphone" | "tablet" => DeviceKind::Phone,
+        "speaker" | "avr" | "stb" | "audiodongle" => DeviceKind::Speaker,
+        "tv" | "castvideo" => DeviceKind::Tv,
+        _ => DeviceKind::Other,
+    }
+}
+
+/// What Spotify says plays where (or why it could not say), and the last
+/// played track when that was asked.
+type RestoreLookup = (
+    Result<Option<crate::model::RemoteState>, String>,
+    Option<crate::model::PlayedItem>,
+);
+
+/// Queue entries asked of Soloist for "Next up".
+const QUEUE_SHOWN: u32 = 50;
 
 /// Run a Web API remote-control call, surfacing failures as a toast.
 fn remote<F>(cx: &mut Context<Player>, call: F)
@@ -1912,4 +2493,47 @@ fn track_from_audio_item(item: &AudioItem) -> Track {
         UniqueFields::Local { .. } => track.is_local = true,
     }
     track
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The context to hand Spotify for another device. Its Web API refuses a
+/// starting track within an artist ("Can't have offset for context type:
+/// ARTIST"), so artist pages send their track list instead.
+fn remote_context(context: Option<String>) -> Option<String> {
+    context.filter(|c| !c.starts_with("spotify:artist:"))
+}
+
+/// Start playback through Soloist's local socket, without Spotify's Web
+/// API. Soloist plays a URI from its start, so a context is played as a
+/// whole when it starts at its first track; otherwise the chosen track
+/// plays and the ones after it are queued.
+fn play_locally(context: Option<&str>, tracks: &[String], offset: Option<&str>, cx: &mut App) {
+    let soloist = app::soloist(cx).read(cx);
+    let from_start = offset.is_none() || tracks.first().map(String::as_str) == offset;
+    let sent = match context {
+        Some(context) if from_start => soloist.command("play", json!({ "uri": context })),
+        _ => {
+            let start = offset
+                .map(str::to_string)
+                .or_else(|| tracks.first().cloned());
+            let Some(start) = start else {
+                return;
+            };
+            let after = tracks.iter().skip_while(|t| **t != start).skip(1).take(30);
+            let sent = soloist.command("play", json!({ "uri": start }));
+            for track in after {
+                soloist.command("add_to_queue", json!({ "uri": track }));
+            }
+            sent
+        }
+    };
+    if !sent {
+        app::toast_error("Soloist isn't ready to play yet; try again in a moment", cx);
+    }
 }

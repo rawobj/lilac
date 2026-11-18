@@ -451,11 +451,23 @@ impl RightPanelView {
         let (devices, active, ours) = {
             let player = app::player(cx);
             let player = player.read(cx);
-            (
-                player.devices.clone(),
-                player.active_device.clone(),
-                player.device_id().map(str::to_string),
-            )
+            // This computer is the built-in player's device, or Soloist's
+            // when Soloist does the playing.
+            let soloist = app::soloist(cx).read(cx);
+            let ours = player.device_id().map(str::to_string).or_else(|| {
+                player
+                    .devices
+                    .iter()
+                    .find(|d| soloist.is_device(&d.id))
+                    .map(|d| d.id.clone())
+                    .or_else(|| soloist.device_id.clone())
+            });
+            // Soloist goes by two ids (a local one until Spotify lists it).
+            let active = match player.active_device.clone() {
+                Some(a) if soloist.is_device(&a) => ours.clone(),
+                other => other,
+            };
+            (player.devices.clone(), active, ours)
         };
         // This computer counts as current when nothing else is playing.
         let current = active.clone().or_else(|| ours.clone());

@@ -6,23 +6,39 @@ use gpui_kit::*;
 use super::scroll_page;
 use crate::app;
 use crate::images::ImageCache;
-use crate::settings::{LyricsStyle, Quality, Settings};
+use crate::settings::{Engine, LyricsStyle, Quality, Settings};
+use crate::soloist::{self, Install, Process, build};
 use crate::theme;
 use crate::ui::{self, Placeholder};
 use crate::ui_state::Dialog;
+use gpui_kit::component::input::{Input, InputState};
 
 pub struct SettingsPage {
     scroll: ScrollHandle,
+    api_key: Entity<InputState>,
 }
 
 impl SettingsPage {
-    pub fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&app::settings(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&app::session(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&app::soloist(cx), |_, _, cx| cx.notify())
+            .detach();
+        let stored = app::soloist(cx).read(cx).store.api_key.clone();
+        let api_key = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Paste your Soloist API key");
+            if let Some(key) = stored {
+                state.set_value(key, window, cx);
+            }
+            state
+        });
         Self {
             scroll: ScrollHandle::new(),
+            api_key,
         }
     }
 }
@@ -37,7 +53,12 @@ fn section(title: &'static str) -> Div {
     )
 }
 
-fn row(title: &'static str, detail: &'static str, control: impl IntoElement) -> Div {
+fn row(
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    let (title, detail) = (title.into(), detail.into());
     div()
         .min_h(px(56.0))
         .py_2()
@@ -153,6 +174,8 @@ impl Render for SettingsPage {
                 switch("gapless", settings.gapless, |s, v| s.gapless = v),
             ));
 
+        let engine = playback_engine(&settings, &self.api_key, cx);
+
         let mut lyrics_styles = div().flex().gap_2();
         for option in LyricsStyle::ALL {
             lyrics_styles = lyrics_styles.child(
@@ -252,10 +275,222 @@ impl Render for SettingsPage {
                 )
                 .child(account)
                 .child(audio)
+                .child(engine)
                 .child(display)
                 .child(integration)
                 .child(storage)
                 .child(about),
         )
     }
+}
+
+/// The engine choice and everything about Soloist.
+fn playback_engine(settings: &Settings, api_key: &Entity<InputState>, cx: &App) -> Div {
+    let soloist = app::soloist(cx).read(cx);
+    let now = soloist::now();
+
+    let mut engines = div().flex().gap_2();
+    for option in Engine::ALL {
+        engines = engines.child(
+            ui::chip(option.label(), option.label(), settings.engine == option).on_click(
+                move |_, _, cx| {
+                    app::update_settings(cx, |s| s.engine = option);
+                    // Start (or stop) the built-in player to match.
+                    app::player(cx).update(cx, |p, cx| p.apply_engine(cx));
+                },
+            ),
+        );
+    }
+    let engine_detail = match settings.engine {
+        Engine::Automatic if soloist.builtin_refused() && soloist.usable() => {
+            "Spotify refused the built-in player lately, so Soloist plays for now."
+        }
+        Engine::Automatic => "The built-in player, switching to Soloist when Spotify refuses it.",
+        Engine::Builtin => "Always the built-in player (librespot).",
+        Engine::Soloist if !soloist.usable() => {
+            "Soloist, once it is installed, has a key and is paired. Until then, the built-in player."
+        }
+        Engine::Soloist => "Always Soloist.",
+    };
+
+    // What is installed, and what happens next.
+    let busy = matches!(
+        soloist.install,
+        Install::Downloading(..) | Install::Unpacking
+    );
+    let status: SharedString = match (&soloist.install, soloist.installed()) {
+        (Install::Downloading(got, Some(total)), _) if *total > 0 => {
+            format!("Downloading from Spotify… {}%", got * 100 / total).into()
+        }
+        (Install::Downloading(got, _), _) => {
+            format!("Downloading from Spotify… {:.1} MB", *got as f64 / 1e6).into()
+        }
+        (Install::Unpacking, _) => "Installing…".into(),
+        (_, Some(b)) if b.expired(now) => format!(
+            "{} expired on {}. Download a newer build to keep using it.",
+            b.version,
+            soloist::date(b.expires_at())
+        )
+        .into(),
+        (_, Some(b)) => format!(
+            "{} · built {} · runs until {} ({} days left)",
+            b.version,
+            soloist::date(b.built_at),
+            soloist::date(b.expires_at()),
+            b.days_left(now)
+        )
+        .into(),
+        (_, None) => "Not installed. Spotify's own headless player; Lilac downloads it from Spotify's servers (soloist-builds.spotifycdn.com) when you ask, under Spotify's terms.".into(),
+    };
+    let failed = match &soloist.install {
+        Install::Failed(why) => Some(format!("Download failed: {why}")),
+        _ => None,
+    };
+    let install_button = if soloist.installed().is_none() {
+        ui::pill_button("soloist-install", "Set up", true)
+            .on_click(|_, _, cx| soloist::Soloist::open_setup(cx))
+    } else if soloist.expired() || soloist.store.newer.is_some() {
+        ui::pill_button("soloist-install", "Update", soloist.expired())
+            .on_click(|_, _, cx| app::soloist(cx).update(cx, |s, cx| s.install(cx)))
+    } else {
+        ui::pill_button("soloist-install", "Check for updates", false)
+            .on_click(|_, _, cx| app::soloist(cx).update(cx, |s, cx| s.check_for_update(true, cx)))
+    };
+    let install_controls = div()
+        .flex()
+        .gap_2()
+        .when(!busy, |d| d.child(install_button))
+        .when(soloist.installed().is_some() && !busy, |d| {
+            d.child(
+                ui::pill_button("soloist-remove", "Remove", false)
+                    .on_click(|_, _, cx| app::soloist(cx).update(cx, |s, cx| s.remove(cx))),
+            )
+        });
+
+    let updates: SharedString = match soloist.installed() {
+        None => "".into(),
+        Some(_) => {
+            let next = soloist::date(soloist.next_check().max(now));
+            let newer = if soloist.store.newer.is_some() {
+                "A newer build is out. "
+            } else {
+                ""
+            };
+            if settings.soloist_auto_update {
+                format!("{newer}Lilac checks Spotify daily and replaces the build two weeks before it expires. Next check: {next}.").into()
+            } else {
+                format!("{newer}You will be reminded two weeks and three days before it expires. Next check: {next}.").into()
+            }
+        }
+    };
+
+    let key_state = api_key.clone();
+    let key_row = row(
+        "API key",
+        if soloist.has_key() {
+            "Saved. It is yours alone: Spotify asks every Soloist user for their own."
+        } else {
+            "Your own key from the Spotify for Developers dashboard. The account needs Premium."
+        },
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(220.0))
+                    .h(px(36.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(px(theme::RADIUS_CONTROL))
+                    .bg(theme::glass_fill_strong())
+                    .border_1()
+                    .border_color(theme::glass_border())
+                    .child(Input::new(api_key).appearance(false)),
+            )
+            .child(
+                ui::pill_button("soloist-key-save", "Save", false).on_click(move |_, _, cx| {
+                    let key = key_state.read(cx).value().to_string();
+                    app::soloist(cx).update(cx, |s, cx| s.set_api_key(key, cx));
+                    app::toast("Soloist API key saved", cx);
+                }),
+            )
+            .child(
+                ui::pill_button("soloist-key-get", "Get a key", false)
+                    .on_click(|_, _, cx| cx.open_url(build::KEY_PAGE)),
+            ),
+    );
+
+    let pairing: SharedString = match (&soloist.process, soloist.logged_in, soloist.store.paired) {
+        (Process::Failed(why), _, _) => format!("Soloist stopped: {why}").into(),
+        (_, true, _) => "Paired and running.".into(),
+        (_, false, true) => "Paired. Soloist starts when Lilac plays through it.".into(),
+        (_, false, false) => {
+            "Pick Soloist once in a Spotify app on this network to log it in.".into()
+        }
+    };
+    let can_pair = soloist.installed().is_some() && soloist.has_key() && !soloist.expired();
+    let pair_controls = div()
+        .flex()
+        .gap_2()
+        .when(can_pair, |d| {
+            d.child(
+                ui::pill_button(
+                    "soloist-pair",
+                    if soloist.store.paired {
+                        "Pair again"
+                    } else {
+                        "Pair"
+                    },
+                    !soloist.store.paired,
+                )
+                .on_click(|_, _, cx| {
+                    let soloist = app::soloist(cx);
+                    if soloist.read(cx).store.paired {
+                        soloist.update(cx, |s, cx| s.unpair(cx));
+                    }
+                    soloist::Soloist::open_setup(cx);
+                }),
+            )
+        })
+        .when(soloist.store.paired, |d| {
+            d.child(
+                ui::pill_button("soloist-unpair", "Forget", false)
+                    .on_click(|_, _, cx| app::soloist(cx).update(cx, |s, cx| s.unpair(cx))),
+            )
+        })
+        .when(soloist.process != Process::Stopped, |d| {
+            d.child(
+                ui::pill_button("soloist-stop", "Stop", false)
+                    .on_click(|_, _, cx| app::soloist(cx).update(cx, |s, cx| s.stop(cx))),
+            )
+        });
+
+    section("Playback engine")
+        .child(row("Engine", engine_detail, engines))
+        .child(row(
+            "Soloist",
+            failed.map(SharedString::from).unwrap_or(status),
+            install_controls,
+        ))
+        .when(soloist.installed().is_some(), |d| {
+            d.child(row(
+                "Update automatically",
+                updates,
+                switch(
+                    "soloist-auto-update",
+                    settings.soloist_auto_update,
+                    |s, v| s.soloist_auto_update = v,
+                ),
+            ))
+        })
+        .child(key_row)
+        .child(row("Pairing", pairing, pair_controls))
+        .child(row(
+            "About Soloist",
+            "Spotify's documentation, downloads and terms.",
+            ui::pill_button("soloist-docs", "Open", false)
+                .on_click(|_, _, cx| cx.open_url(build::DOWNLOADS_PAGE)),
+        ))
 }

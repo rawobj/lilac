@@ -4,6 +4,7 @@ mod login;
 mod overlays;
 mod player_bar;
 mod sidebar;
+mod soloist_setup;
 mod splash;
 mod top_bar;
 
@@ -101,8 +102,11 @@ pub struct Lilac {
     pages: HashMap<Route, AnyView>,
     dialog_name: Entity<InputState>,
     dialog_description: Entity<InputState>,
+    soloist_key: Entity<InputState>,
     menu_scroll: ScrollHandle,
     dialog_scroll: ScrollHandle,
+    /// Playback is locked until Soloist is set up (see `Player::locked`).
+    locked: bool,
     shown_dialog: Option<Dialog>,
     /// The loading screen, from start (or login) until the player is warm.
     splash: Option<Entity<Splash>>,
@@ -147,6 +151,23 @@ impl Lilac {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        // Only the Soloist dialogs show its state; spare the window the
+        // download progress otherwise.
+        cx.observe(&app::soloist(cx), |this: &mut Self, _, cx| {
+            if matches!(
+                app::ui(cx).read(cx).dialog,
+                Some(Dialog::SoloistSetup | Dialog::SoloistExpired)
+            ) {
+                cx.notify();
+            }
+            this.sync_locked(cx);
+        })
+        .detach();
+        cx.subscribe(
+            &app::player(cx),
+            |this: &mut Self, _, _: &crate::player::PlayerEvent, cx| this.sync_locked(cx),
+        )
+        .detach();
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -162,6 +183,12 @@ impl Lilac {
             dialog_name: cx.new(|cx| InputState::new(window, cx).placeholder("Playlist name")),
             dialog_description: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Add an optional description")),
+            soloist_key: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("spak_…")
+            }),
+            locked: false,
             menu_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             shown_dialog: None,
@@ -188,10 +215,21 @@ impl Lilac {
     }
 
     /// Prefill the dialog fields when a dialog opens.
+    fn sync_locked(&mut self, cx: &mut Context<Self>) {
+        let locked = app::player(cx).read(cx).locked(cx);
+        if locked != self.locked {
+            self.locked = locked;
+            cx.notify();
+        }
+    }
+
     fn sync_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = app::ui(cx).read(cx).dialog.clone();
         if dialog == self.shown_dialog {
             return;
+        }
+        if self.shown_dialog == Some(Dialog::SoloistSetup) {
+            app::soloist(cx).update(cx, |s, cx| s.setup_closed(cx));
         }
         self.shown_dialog = dialog.clone();
         // A new dialog starts at its top.
@@ -354,6 +392,9 @@ impl Render for Lilac {
                                 )
                             }),
                     )
+                    .when(self.locked, |column| {
+                        column.child(soloist_setup::locked_banner())
+                    })
                     .child(cached(
                         &self.player_bar,
                         StyleRefinement::default()
@@ -382,6 +423,7 @@ impl Render for Lilac {
             .children(overlays::dialog(
                 &self.dialog_name,
                 &self.dialog_description,
+                &self.soloist_key,
                 &self.dialog_scroll,
                 cx,
             ))

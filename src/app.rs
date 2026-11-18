@@ -13,6 +13,7 @@ use crate::player::Player;
 use crate::search::Search;
 use crate::session::Session;
 use crate::settings::Settings;
+use crate::soloist::Soloist;
 use crate::spotify::api::Api;
 use crate::ui_state::UiState;
 
@@ -26,6 +27,7 @@ pub struct AppState {
     pub settings: Entity<Settings>,
     pub feed: Entity<Feed>,
     pub friends: Entity<Friends>,
+    pub soloist: Entity<Soloist>,
 }
 
 impl Global for AppState {}
@@ -44,6 +46,7 @@ impl AppState {
         let search = cx.new(|_| Search::default());
         let feed = cx.new(|cx| Feed::new(&session, cx));
         let friends = cx.new(|cx| Friends::new(&ui, cx));
+        let soloist = cx.new(Soloist::new);
 
         // `lilac spotify:album:…` or an open.spotify.com link opens that page directly.
         if let Some(route) = std::env::args()
@@ -63,6 +66,7 @@ impl AppState {
             settings,
             feed,
             friends,
+            soloist,
         });
         // Connect to Spotify while the stored login is still being checked.
         player.update(cx, |player, cx| player.start_with_stored_login(cx));
@@ -103,6 +107,10 @@ pub fn feed(cx: &App) -> Entity<Feed> {
 
 pub fn friends(cx: &App) -> Entity<Friends> {
     cx.global::<AppState>().friends.clone()
+}
+
+pub fn soloist(cx: &App) -> Entity<Soloist> {
+    cx.global::<AppState>().soloist.clone()
 }
 
 pub fn api(cx: &App) -> Api {

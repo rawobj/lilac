@@ -3993,6 +3993,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

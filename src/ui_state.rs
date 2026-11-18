@@ -26,7 +26,11 @@ pub struct Toast {
     pub id: u64,
     pub text: SharedString,
     pub kind: ToastKind,
+    /// Buttons offering what to do about it.
+    pub actions: Vec<(SharedString, ToastAction)>,
 }
+
+pub type ToastAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub type MenuAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -87,6 +91,10 @@ pub enum Dialog {
     },
     Shortcuts,
     About,
+    /// The guided Soloist setup: download, key, pairing, play.
+    SoloistSetup,
+    /// The installed Soloist build no longer runs.
+    SoloistExpired,
 }
 
 pub struct UiState {
@@ -143,16 +151,54 @@ impl UiState {
         self.push_toast(text.into(), ToastKind::Error, cx);
     }
 
+    /// A toast with a button that does something about it.
+    pub fn toast_with_action(
+        &mut self,
+        text: impl Into<SharedString>,
+        kind: ToastKind,
+        label: impl Into<SharedString>,
+        action: impl Fn(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let action: ToastAction = Rc::new(action);
+        self.push_toast_with(text.into(), kind, vec![(label.into(), action)], cx);
+    }
+
+    pub fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.id != id);
+        cx.notify();
+    }
+
     fn push_toast(&mut self, text: SharedString, kind: ToastKind, cx: &mut Context<Self>) {
+        self.push_toast_with(text, kind, Vec::new(), cx);
+    }
+
+    fn push_toast_with(
+        &mut self,
+        text: SharedString,
+        kind: ToastKind,
+        actions: Vec<(SharedString, ToastAction)>,
+        cx: &mut Context<Self>,
+    ) {
         self.next_id += 1;
         let id = self.next_id;
-        self.toasts.push(Toast { id, text, kind });
+        // Time to read it and reach for a button.
+        let lifetime = match (kind, actions.is_empty()) {
+            (_, false) => 10,
+            (ToastKind::Error, true) => 5,
+            (ToastKind::Info, true) => 3,
+        };
+        self.toasts.push(Toast {
+            id,
+            text,
+            kind,
+            actions,
+        });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
         }
         cx.notify();
 
-        let lifetime = if kind == ToastKind::Error { 5 } else { 3 };
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(lifetime))

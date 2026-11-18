@@ -572,6 +572,9 @@ pub struct RemoteState {
     pub progress_ms: Option<u32>,
     #[serde(default)]
     pub item: Option<Track>,
+    /// What the item plays in; null for a list of tracks.
+    #[serde(default)]
+    pub context: Option<PlayedContext>,
 }
 
 /// A device as the Web API lists it.
