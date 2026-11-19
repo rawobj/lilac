@@ -153,6 +153,9 @@ impl Session {
             crate::disk_cache::clear();
             crate::history::clear();
             let _ = std::fs::remove_file(profile_file());
+            // Paired, Soloist stays logged in to this account; the key is
+            // the user's own and stays.
+            crate::app::soloist(cx).update(cx, |s, cx| s.unpair(cx));
             let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());
             runtime::spawn(async move {
                 web.set(None).await;

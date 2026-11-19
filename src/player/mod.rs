@@ -188,7 +188,17 @@ impl Player {
             }
             SessionEvent::LoggedOut => {
                 this.stop(cx);
+                // Soloist plays under its own login; it does not hear this.
+                app::soloist(cx).update(cx, |s, cx| s.stop(cx));
                 this.drop_backend();
+                // The reading session is the old account's too; the next
+                // login starts its own and restores from there.
+                this.reader = None;
+                this.reader_starting = None;
+                this.restore = None;
+                this.restore_lookup = None;
+                this.play_when_ready = false;
+                crate::spotify::streaming::set_session(None);
                 this.devices.clear();
                 this.active_device = None;
                 this.warmup = Warmup::Idle;
