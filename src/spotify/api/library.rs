@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::{Api, is_unsupported};
 use crate::model::*;
+use crate::spotify::streaming;
 
 impl Api {
     /// Every playlist the user owns or follows.
@@ -114,10 +115,54 @@ impl Api {
     /// The unified `/me/library` endpoint replaced the per-type ones in 2026.
     /// Older deployments still answer on the legacy paths, so fall back to
     /// them when the new one is not available.
+    /// Like, save or follow (or undo it). Songs, albums, artists and
+    /// podcasts go to the library service through the streaming session;
+    /// playlists, episodes and anything the service refuses, to the Web API.
     pub async fn set_saved(&self, uris: &[String], saved: bool) -> Result<()> {
         if uris.is_empty() {
             return Ok(());
         }
+        let mut rest: Vec<String> = Vec::new();
+        if self.is_demo() {
+            rest = uris.to_vec();
+        } else {
+            for (set, kinds) in [
+                ("collection", &["spotify:track:", "spotify:album:"][..]),
+                ("artist", &["spotify:artist:"][..]),
+                ("show", &["spotify:show:"][..]),
+            ] {
+                let group: Vec<String> = uris
+                    .iter()
+                    .filter(|u| kinds.iter().any(|k| u.starts_with(k)))
+                    .cloned()
+                    .collect();
+                if group.is_empty() {
+                    continue;
+                }
+                if let Err(err) = streaming::collection_write(set, &group, saved).await {
+                    eprintln!("lilac: saving through the library service failed: {err:#}");
+                    rest.extend(group);
+                }
+            }
+            rest.extend(
+                uris.iter()
+                    .filter(|u| {
+                        ![
+                            "spotify:track:",
+                            "spotify:album:",
+                            "spotify:artist:",
+                            "spotify:show:",
+                        ]
+                        .iter()
+                        .any(|k| u.starts_with(k))
+                    })
+                    .cloned(),
+            );
+        }
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let uris = &rest[..];
         let method = if saved { Method::PUT } else { Method::DELETE };
         let mut result = Ok(());
         for chunk in uris.chunks(40) {

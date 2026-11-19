@@ -117,7 +117,15 @@ impl CollectionPage {
         let api = app::api(cx);
 
         match self.source.clone() {
-            Source::Liked => self.sync_liked(cx),
+            Source::Liked => {
+                self.sync_liked(cx);
+                app::library(cx).update(cx, |library, cx| {
+                    if library.liked.is_empty() {
+                        library.load_more_liked(cx);
+                    }
+                    library.revisit_liked(cx);
+                });
+            }
             Source::Album(id) => {
                 self.loading = self.tracks.is_empty();
                 cx.spawn(async move |this, cx| {
@@ -435,7 +443,13 @@ impl CollectionPage {
 
     fn hero(&self, window: &Window, cx: &mut App) -> AnyElement {
         let total_ms: u64 = self.tracks.iter().map(|t| t.duration_ms as u64).sum();
-        let count = self.tracks.len();
+        // Liked Songs counts every liked song, loaded or not.
+        let count = match self.source {
+            Source::Liked => {
+                (app::library(cx).read(cx).liked_total as usize).max(self.tracks.len())
+            }
+            _ => self.tracks.len(),
+        };
         let songs = if count == 1 {
             "1 song".to_string()
         } else {
@@ -727,6 +741,16 @@ impl CollectionPage {
             }
             _ => {
                 let index = ix - HEADER_ROWS;
+                // Liked Songs loads as it is scrolled: nearing the end of
+                // what is loaded asks for the next batch.
+                if matches!(self.source, Source::Liked) && index + LOAD_AHEAD >= self.tracks.len() {
+                    cx.defer(|cx| {
+                        let library = app::library(cx);
+                        if library.read(cx).liked_has_more() {
+                            library.update(cx, |library, cx| library.load_more_liked(cx));
+                        }
+                    });
+                }
                 let Some(track) = self.tracks.get(index) else {
                     return div().into_any_element();
                 };
@@ -840,6 +864,9 @@ impl CollectionPage {
         )
     }
 }
+
+/// Rows from the end of what is loaded at which Liked Songs asks for more.
+const LOAD_AHEAD: usize = 15;
 
 /// A kept album younger than this is not asked about again when opened,
 /// so going back and forth costs nothing.

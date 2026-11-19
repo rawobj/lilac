@@ -466,6 +466,19 @@ pub struct Show {
 }
 
 impl Show {
+    /// The Web API's shape, readable by `Show`'s deserializer.
+    pub fn to_api_json(&self) -> Value {
+        json!({
+            "id": self.id.as_ref(),
+            "uri": self.uri.as_ref(),
+            "name": self.name.as_ref(),
+            "publisher": self.publisher.as_ref().map(|p| p.as_ref()),
+            "description": self.description.as_ref().map(|d| d.as_ref()),
+            "images": self.images.to_api_json(),
+            "total_episodes": self.total_episodes,
+        })
+    }
+
     pub fn as_ref(&self) -> ShowRef {
         ShowRef {
             id: self.id.clone(),

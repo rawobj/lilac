@@ -8,6 +8,7 @@ mod friends;
 mod images;
 mod keys;
 mod library;
+mod library_cache;
 mod menus;
 mod model;
 #[cfg(target_os = "linux")]

@@ -149,6 +149,7 @@ impl Session {
         } else {
             Credentials::forget_all();
             crate::playlist_cache::clear();
+            crate::library_cache::clear();
             crate::disk_cache::clear();
             let _ = std::fs::remove_file(profile_file());
             let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());

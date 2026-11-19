@@ -225,11 +225,23 @@ impl Api {
         }
     }
 
+    /// From the streaming session; the Web API only when that fails.
     pub async fn show(&self, id: &str) -> Result<Show> {
+        if !self.is_demo()
+            && let Ok(show) = streaming::show(id).await
+        {
+            return Ok(show);
+        }
         self.get(&format!("/shows/{id}")).await
     }
 
+    /// From the streaming session; the Web API only when that fails.
     pub async fn show_episodes(&self, show: &Show, offset: u32) -> Result<Page<Track>> {
+        if !self.is_demo()
+            && let Ok(page) = streaming::show_episodes(show, offset).await
+        {
+            return Ok(page);
+        }
         let mut page: Page<Track> = self
             .get(&format!(
                 "/shows/{}/episodes?limit=50&offset={offset}",

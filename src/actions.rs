@@ -98,7 +98,7 @@ pub fn play_artist(id: SharedString, name: SharedString, cx: &mut App) {
 
 /// Play the user's liked songs from the top.
 pub fn play_liked(cx: &mut App) {
-    let tracks = app::library(cx).read(cx).liked.clone();
+    let tracks = app::library(cx).read(cx).liked_for_play();
     app::player(cx).update(cx, |player, cx| {
         player.play_context(Some(ContextUri::Liked), "Liked Songs", tracks, 0, cx)
     });

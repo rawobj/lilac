@@ -24,6 +24,8 @@ use protobuf::{EnumOrUnknown, Message as _};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use gpui_kit::SharedString;
+
 use crate::disk_cache;
 use crate::model::{Album, Artist, Page, Playlist, SavedItem, Track};
 
@@ -436,6 +438,53 @@ pub async fn playlist(id: &str) -> Result<Playlist> {
     });
     Ok(serde_json::from_value(value)?)
 }
+
+/// Rootlist entries read per request; Spotify's own clients ask for 120.
+const ROOTLIST_PAGE: usize = 120;
+/// Stops a runaway rootlist (Spotify caps it far below this).
+const ROOTLIST_MAX: usize = 2000;
+
+/// The playlists in the user's library, in their sidebar order, read with
+/// librespot's `get_rootlist`. This is the official clients' own list and is
+/// not under the Web API's per-app rate limit.
+///
+/// Folders are flattened. Owners come back as user names only; the caller
+/// fills in display names it already knows.
+pub async fn rootlist() -> Result<Vec<Playlist>> {
+    use librespot_protocol::playlist4_external::SelectedListContent;
+
+    let session = session().await?;
+    let mut out = Vec::new();
+    let mut from = 0;
+    loop {
+        let bytes = session
+            .spclient()
+            .get_rootlist(from, Some(ROOTLIST_PAGE))
+            .await?;
+        // Parsed from the message itself: librespot's typed wrapper reads
+        // each item's revision as a 16-byte id, which rootlist revisions
+        // are not, and fails the whole list.
+        let list = SelectedListContent::parse_from_bytes(&bytes)?;
+        let contents = list.contents.get_or_default();
+        for (index, item) in contents.items.iter().enumerate() {
+            let Some(id) = item.uri().strip_prefix("spotify:playlist:") else {
+                continue;
+            };
+            let meta = contents.meta_items.get(index);
+            let playlist = rootlist_playlist(id, meta);
+            // Playlists deleted or no longer available come back nameless.
+            if !playlist.name.is_empty() {
+                out.push(playlist);
+            }
+        }
+        from += contents.items.len();
+        let total = list.length().max(0) as usize;
+        if contents.items.is_empty() || from >= total || from >= ROOTLIST_MAX {
+            return Ok(out);
+        }
+    }
+}
+
 /// The signed-in profile from the streaming session: the account's own
 /// details from the login, name and picture from librespot's
 /// `get_user_profile`. Not under the Web API's rate limit.
@@ -491,6 +540,45 @@ pub async fn user_names(users: Vec<String>) -> Result<Vec<(String, String)>> {
         .into_iter()
         .flatten()
         .collect())
+}
+
+fn rootlist_playlist(
+    id: &str,
+    meta: Option<&librespot_protocol::playlist4_external::MetaItem>,
+) -> Playlist {
+    let mut playlist = Playlist {
+        id: id.to_string().into(),
+        uri: format!("spotify:playlist:{id}").into(),
+        ..Default::default()
+    };
+    let Some(meta) = meta else {
+        return playlist;
+    };
+    let attrs = meta.attributes.get_or_default();
+    playlist.name = attrs.name().to_string().into();
+    playlist.description = Some(attrs.description())
+        .filter(|d| !d.is_empty())
+        .map(|d| d.to_string().into());
+    playlist.collaborative = attrs.collaborative();
+    playlist.owner.id = meta.owner_username().to_string().into();
+    playlist.items = Some(crate::model::PageRef {
+        total: meta.length().max(0) as u32,
+    });
+    // Spotify's ready-made sizes (mosaics included); else the uploaded picture.
+    let sized = |names: &[&str]| {
+        attrs
+            .picture_size
+            .iter()
+            .find(|p| names.contains(&p.target_name()) && !p.url().is_empty())
+            .map(|p| SharedString::from(p.url().to_string()))
+    };
+    playlist.images.small = sized(&["small"]);
+    playlist.images.medium = sized(&["default", "medium"]);
+    playlist.images.large = sized(&["large", "xlarge"]);
+    if playlist.images.is_empty() && !attrs.picture().is_empty() {
+        playlist.images.medium = Some(image_url(attrs.picture()).into());
+    }
+    playlist
 }
 
 /// One page of a playlist's tracks, in the Web API's shape.
@@ -645,6 +733,491 @@ async fn tracks(uris: &[&SpotifyUri]) -> Result<Vec<Value>> {
     }
     Ok(ids.iter().filter_map(|id| known.remove(id)).collect())
 }
+
+/// One entry of a library list (liked songs and saved albums, followed
+/// artists, saved podcasts) from Spotify's collection service.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollectionItem {
+    pub uri: String,
+    /// Unix seconds.
+    pub added_at: i64,
+    /// Only in changes: the entry was taken out.
+    pub removed: bool,
+}
+
+/// Entries per page of a full library list.
+const COLLECTION_PAGE: i32 = 300;
+/// Stops a runaway list.
+const COLLECTION_MAX: usize = 20_000;
+
+/// The collection service's messages (`collection2v2.proto`, which
+/// librespot ships but does not compile), written and read by hand: a few
+/// strings, numbers and flags.
+mod wire {
+    use protobuf::{CodedInputStream, CodedOutputStream};
+
+    use super::CollectionItem;
+
+    /// PageRequest {1 username, 2 set, 3 pagination_token, 4 limit} and
+    /// DeltaRequest {1 username, 2 set, 3 last_sync_token}.
+    pub fn request(username: &str, set: &str, token: &str, limit: Option<i32>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut os = CodedOutputStream::vec(&mut out);
+            let _ = os.write_string(1, username);
+            let _ = os.write_string(2, set);
+            if !token.is_empty() {
+                let _ = os.write_string(3, token);
+            }
+            if let Some(limit) = limit {
+                let _ = os.write_int32(4, limit);
+            }
+            let _ = os.flush();
+        }
+        out
+    }
+
+    /// WriteRequest {1 username, 2 set, 3 items, 4 client_update_id}, each
+    /// item CollectionItem {1 uri, 2 added_at, 3 is_removed}.
+    pub fn write_request(
+        username: &str,
+        set: &str,
+        uris: &[String],
+        removed: bool,
+        now: i32,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut os = CodedOutputStream::vec(&mut out);
+            let _ = os.write_string(1, username);
+            let _ = os.write_string(2, set);
+            for uri in uris {
+                let mut item = Vec::new();
+                {
+                    let mut is = CodedOutputStream::vec(&mut item);
+                    let _ = is.write_string(1, uri);
+                    let _ = is.write_int32(2, now);
+                    if removed {
+                        let _ = is.write_bool(3, true);
+                    }
+                    let _ = is.flush();
+                }
+                let _ = os.write_bytes(3, &item);
+            }
+            let _ = os.write_string(4, &format!("lilac-{now}"));
+            let _ = os.flush();
+        }
+        out
+    }
+
+    /// PageResponse {1 items, 2 next_page_token, 3 sync_token} and
+    /// DeltaResponse {1 delta_update_possible, 2 items, 3 sync_token}.
+    pub struct Response {
+        pub items: Vec<CollectionItem>,
+        pub next_page_token: String,
+        pub sync_token: String,
+        pub delta_possible: bool,
+    }
+
+    pub fn response(bytes: &[u8], delta: bool) -> protobuf::Result<Response> {
+        let mut out = Response {
+            items: Vec::new(),
+            next_page_token: String::new(),
+            sync_token: String::new(),
+            delta_possible: false,
+        };
+        let items_field = if delta { 2 } else { 1 };
+        let mut is = CodedInputStream::from_bytes(bytes);
+        while let Some(tag) = is.read_raw_tag_or_eof()? {
+            let (field, wire_type) = (tag >> 3, tag & 7);
+            match (field, wire_type) {
+                (f, 2) if f == items_field => {
+                    let raw = is.read_bytes()?;
+                    out.items.push(item(&raw)?);
+                }
+                (2, 2) if !delta => out.next_page_token = is.read_string()?,
+                (1, 0) if delta => out.delta_possible = is.read_bool()?,
+                (3, 2) => out.sync_token = is.read_string()?,
+                _ => skip(&mut is, wire_type)?,
+            }
+        }
+        Ok(out)
+    }
+
+    fn skip(is: &mut CodedInputStream, wire_type: u32) -> protobuf::Result<()> {
+        match wire_type {
+            0 => drop(is.read_raw_varint64()?),
+            1 => drop(is.read_fixed64()?),
+            2 => drop(is.read_bytes()?),
+            5 => drop(is.read_fixed32()?),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected protobuf wire type",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// CollectionItem {1 uri, 2 added_at, 3 is_removed, 4 context_uri}.
+    fn item(bytes: &[u8]) -> protobuf::Result<CollectionItem> {
+        let mut item = CollectionItem {
+            uri: String::new(),
+            added_at: 0,
+            removed: false,
+        };
+        let mut is = CodedInputStream::from_bytes(bytes);
+        while let Some(tag) = is.read_raw_tag_or_eof()? {
+            match (tag >> 3, tag & 7) {
+                (1, 2) => item.uri = is.read_string()?,
+                (2, 0) => item.added_at = is.read_int32()? as i64,
+                (3, 0) => item.removed = is.read_bool()?,
+                (_, wire_type) => skip(&mut is, wire_type)?,
+            }
+        }
+        Ok(item)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn reads_what_it_writes_shaped_like_spotify() {
+            // A PageResponse with one item, a next page and a sync token.
+            let mut item_bytes = Vec::new();
+            {
+                let mut os = CodedOutputStream::vec(&mut item_bytes);
+                os.write_string(1, "spotify:track:a").unwrap();
+                os.write_int32(2, 1_700_000_000).unwrap();
+                os.flush().unwrap();
+            }
+            let mut page = Vec::new();
+            {
+                let mut os = CodedOutputStream::vec(&mut page);
+                os.write_bytes(1, &item_bytes).unwrap();
+                os.write_string(2, "next").unwrap();
+                os.write_string(3, "sync").unwrap();
+                os.write_int32(9, 7).unwrap();
+                os.flush().unwrap();
+            }
+            let read = response(&page, false).unwrap();
+            assert_eq!(read.items.len(), 1);
+            assert_eq!(read.items[0].uri, "spotify:track:a");
+            assert_eq!(read.items[0].added_at, 1_700_000_000);
+            assert_eq!(read.next_page_token, "next");
+            assert_eq!(read.sync_token, "sync");
+            let req = request("u", "collection", "", Some(300));
+            assert!(!req.is_empty());
+        }
+    }
+}
+
+/// The collection service wants its own content type; plain protobuf is
+/// refused with 400.
+const COLLECTION_TYPE: &str = "application/vnd.collection-v2.spotify.proto";
+
+async fn collection_call(endpoint: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+    let session = session().await?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    let kind = reqwest::header::HeaderValue::from_static(COLLECTION_TYPE);
+    headers.insert(reqwest::header::CONTENT_TYPE, kind.clone());
+    headers.insert(reqwest::header::ACCEPT, kind);
+    Ok(session
+        .spclient()
+        .request(&reqwest::Method::POST, endpoint, Some(headers), Some(&body))
+        .await?
+        .to_vec())
+}
+
+/// A whole library list (`set`: "collection" for liked songs and saved
+/// albums, "artist", "show"), newest first, and the token that later asks
+/// only for what changed ([`collection_changes`]). Spotify's own clients
+/// sync their library this way; the request is ours (librespot has the
+/// message formats but no call for it).
+pub async fn collection(set: &str) -> Result<(Vec<CollectionItem>, String)> {
+    let username = session().await?.username();
+    let mut items = Vec::new();
+    let mut token = String::new();
+    loop {
+        let body = wire::request(&username, set, &token, Some(COLLECTION_PAGE));
+        let page = wire::response(
+            &collection_call("/collection/v2/paging", body).await?,
+            false,
+        )?;
+        items.extend(page.items);
+        if page.next_page_token.is_empty() || items.len() >= COLLECTION_MAX {
+            let mut items: Vec<CollectionItem> = items.into_iter().filter(|i| !i.removed).collect();
+            items.sort_by_key(|i| std::cmp::Reverse(i.added_at));
+            return Ok((items, page.sync_token));
+        }
+        token = page.next_page_token;
+    }
+}
+
+/// What changed in a library list since `sync_token`, and the next token.
+/// `None` when Spotify cannot say (the token is too old): load it whole.
+pub async fn collection_changes(
+    set: &str,
+    sync_token: &str,
+) -> Result<Option<(Vec<CollectionItem>, String)>> {
+    let username = session().await?.username();
+    let body = wire::request(&username, set, sync_token, None);
+    let delta = wire::response(&collection_call("/collection/v2/delta", body).await?, true)?;
+    Ok(delta
+        .delta_possible
+        .then_some((delta.items, delta.sync_token)))
+}
+
+/// Add to (or take out of) a library list: liked songs and saved albums
+/// ("collection"), followed artists ("artist"), saved podcasts ("show"), as
+/// Spotify's own clients write them.
+pub async fn collection_write(set: &str, uris: &[String], saved: bool) -> Result<()> {
+    if uris.is_empty() {
+        return Ok(());
+    }
+    let username = session().await?.username();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i32)
+        .unwrap_or(0);
+    let body = wire::write_request(&username, set, uris, !saved, now);
+    collection_call("/collection/v2/write", body).await?;
+    Ok(())
+}
+
+/// Tracks by URI, in the Web API's shape and in the given order (kept on
+/// disk; only the ones not kept are asked for).
+pub async fn tracks_by_uri(uris: &[String]) -> Result<Vec<Track>> {
+    let parsed: Vec<SpotifyUri> = uris
+        .iter()
+        .filter_map(|u| SpotifyUri::from_uri(u).ok())
+        .collect();
+    let refs: Vec<&SpotifyUri> = parsed.iter().collect();
+    Ok(tracks(&refs)
+        .await?
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
+/// Albums by URI, in the given order.
+pub async fn albums_by_uri(uris: &[String]) -> Result<Vec<Album>> {
+    let parsed: Vec<SpotifyUri> = uris
+        .iter()
+        .filter_map(|u| SpotifyUri::from_uri(u).ok())
+        .collect();
+    let found: Vec<RawAlbum> = get_many(ExtensionKind::ALBUM_V4, &parsed).await?;
+    Ok(in_order(
+        uris,
+        found.iter().map(|album| {
+            let mut value = album_json(album);
+            value["total_tracks"] = json!(album.tracks().count());
+            (album.id.to_uri().unwrap_or_default(), value)
+        }),
+    ))
+}
+
+/// Artists by URI, in the given order.
+pub async fn artists_by_uri(uris: &[String]) -> Result<Vec<Artist>> {
+    let parsed: Vec<SpotifyUri> = uris
+        .iter()
+        .filter_map(|u| SpotifyUri::from_uri(u).ok())
+        .collect();
+    let found: Vec<RawArtist> = get_many(ExtensionKind::ARTIST_V4, &parsed).await?;
+    Ok(in_order(
+        uris,
+        found
+            .iter()
+            .map(|artist| (artist.id.to_uri().unwrap_or_default(), artist_json(artist))),
+    ))
+}
+
+/// Podcasts by URI, in the given order.
+pub async fn shows_by_uri(uris: &[String]) -> Result<Vec<crate::model::Show>> {
+    use librespot_metadata::Show as RawShow;
+    let parsed: Vec<SpotifyUri> = uris
+        .iter()
+        .filter_map(|u| SpotifyUri::from_uri(u).ok())
+        .collect();
+    let found: Vec<RawShow> = get_many(ExtensionKind::SHOW_V4, &parsed).await?;
+    Ok(in_order(
+        uris,
+        found.iter().map(|show| {
+            let uri = show.id.to_uri().unwrap_or_default();
+            let value = json!({
+                "id": base62(&show.id),
+                "uri": uri,
+                "name": show.name,
+                "publisher": show.publisher,
+                "description": show.description,
+                "images": images_json(&show.covers),
+                "total_episodes": show.episodes.len(),
+            });
+            (uri, value)
+        }),
+    ))
+}
+
+/// Parsed items put back in the order of `uris`.
+fn in_order<T: serde::de::DeserializeOwned>(
+    uris: &[String],
+    found: impl Iterator<Item = (String, Value)>,
+) -> Vec<T> {
+    let mut found: HashMap<String, Value> = found.collect();
+    uris.iter()
+        .filter_map(|uri| found.remove(uri))
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect()
+}
+
+/// A podcast, in the Web API's shape.
+pub async fn show(id: &str) -> Result<crate::model::Show> {
+    let uri = format!("spotify:show:{id}");
+    shows_by_uri(std::slice::from_ref(&uri))
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("podcast not found"))
+}
+
+/// Episodes per page, as the Web API pages them.
+const EPISODE_PAGE: usize = 50;
+
+/// One page of a podcast's episodes, newest first, in the Web API's shape.
+pub async fn show_episodes(show: &crate::model::Show, offset: u32) -> Result<Page<Track>> {
+    use librespot_metadata::{Episode as RawEpisode, Show as RawShow};
+    let uri = SpotifyUri::from_uri(&format!("spotify:show:{}", show.id))?;
+    let raw: RawShow = get_many(ExtensionKind::SHOW_V4, &[uri])
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("podcast not found"))?;
+    let all: Vec<SpotifyUri> = raw.episodes.iter().cloned().collect();
+    let from = (offset as usize).min(all.len());
+    let slice = &all[from..(from + EPISODE_PAGE).min(all.len())];
+    let mut episodes: Vec<RawEpisode> = get_many(ExtensionKind::EPISODE_V4, slice).await?;
+    episodes.sort_by_key(|e| std::cmp::Reverse(e.publish_time.0));
+    let show_ref = json!({
+        "id": show.id.as_ref(),
+        "name": show.name.as_ref(),
+        "images": show.images.to_api_json(),
+    });
+    let items: Vec<Value> = episodes
+        .iter()
+        .map(|e| {
+            let date = e.publish_time.0;
+            json!({
+                "id": base62(&e.id),
+                "uri": e.id.to_uri().unwrap_or_default(),
+                "name": e.name,
+                "type": "episode",
+                "duration_ms": e.duration.max(0),
+                "explicit": e.is_explicit,
+                "is_playable": true,
+                "description": e.description,
+                "release_date": format!("{:04}-{:02}-{:02}", date.year(), u8::from(date.month()), date.day()),
+                "images": images_json(&e.covers),
+                "show": show_ref,
+            })
+        })
+        .collect();
+    let next = (from + EPISODE_PAGE < all.len()).then(|| format!("offset={}", from + EPISODE_PAGE));
+    Ok(serde_json::from_value(json!({
+        "items": items,
+        "total": all.len(),
+        "offset": from,
+        "next": next,
+    }))?)
+}
+
+/// Playlists read at once while making covers.
+const COVER_PARALLEL: usize = 4;
+
+/// Covers for playlists without an uploaded picture, made the way Spotify
+/// makes them: the covers of the first four different albums in the
+/// playlist, tiled (`mosaic.scdn.co`), or the first album's cover when there
+/// are fewer than four. Each playlist is read once (four at a time), and
+/// the albums' covers come in one batched lookup (kept on disk).
+pub async fn playlist_covers(ids: Vec<String>) -> Result<Vec<(String, crate::model::Images)>> {
+    use futures_util::StreamExt as _;
+    let session = session().await?;
+    let firsts: Vec<(String, Vec<SpotifyUri>)> = futures_util::stream::iter(ids)
+        .map(|id| {
+            let session = session.clone();
+            async move {
+                let uri = SpotifyUri::from_uri(&format!("spotify:playlist:{id}")).ok()?;
+                let playlist = RawPlaylist::get(&session, &uri).await.ok()?;
+                let tracks: Vec<SpotifyUri> = playlist
+                    .tracks()
+                    .filter(|t| matches!(t, SpotifyUri::Track { .. }))
+                    .take(12)
+                    .cloned()
+                    .collect();
+                Some((id, tracks))
+            }
+        })
+        .buffer_unordered(COVER_PARALLEL)
+        .filter_map(|found| async move { found })
+        .collect()
+        .await;
+    let mut all: Vec<&SpotifyUri> = firsts.iter().flat_map(|(_, t)| t.iter()).collect();
+    all.dedup();
+    let details: HashMap<String, Value> = tracks(&all)
+        .await?
+        .into_iter()
+        .filter_map(|t| Some((t["uri"].as_str()?.to_string(), t)))
+        .collect();
+    // An image id (40 hex digits) of a cover at roughly `width`.
+    let cover = |track: &Value, width: u64| -> Option<String> {
+        let images = track.pointer("/album/images")?.as_array()?;
+        let best = images
+            .iter()
+            .min_by_key(|i| i["width"].as_u64().unwrap_or(0).abs_diff(width))?;
+        Some(best["url"].as_str()?.rsplit('/').next()?.to_string())
+    };
+    Ok(firsts
+        .into_iter()
+        .filter_map(|(id, tracks)| {
+            let mut albums: Vec<&Value> = Vec::new();
+            for uri in &tracks {
+                let Some(track) = uri.to_uri().ok().and_then(|u| details.get(&u)) else {
+                    continue;
+                };
+                let album = &track["album"]["id"];
+                if !albums.iter().any(|a| &a["album"]["id"] == album) {
+                    albums.push(track);
+                }
+            }
+            let first = albums.first()?;
+            let images = if albums.len() >= 4 {
+                let tile = |width: u64| -> Option<SharedString> {
+                    let ids: Option<Vec<String>> =
+                        albums.iter().take(4).map(|t| cover(t, width)).collect();
+                    let size = if width >= 640 { 640 } else { 300 };
+                    Some(format!("https://mosaic.scdn.co/{size}/{}", ids?.concat()).into())
+                };
+                crate::model::Images {
+                    small: tile(300),
+                    medium: tile(300),
+                    large: tile(640),
+                }
+            } else {
+                let url = |width: u64| {
+                    cover(first, width)
+                        .map(|id| SharedString::from(format!("https://i.scdn.co/image/{id}")))
+                };
+                crate::model::Images {
+                    small: url(64),
+                    medium: url(300),
+                    large: url(640),
+                }
+            };
+            Some((id, images))
+        })
+        .collect())
+}
+
 /// One track's details (kept on disk like any other; see [`tracks`]).
 pub async fn track(uri: &str) -> Result<Track> {
     let uri = SpotifyUri::from_uri(uri)?;
