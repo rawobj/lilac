@@ -993,8 +993,12 @@ impl Player {
         {
             // Nothing plays yet: start where we were, on Soloist.
             let context = self.connect_context.clone();
+            // A list Lilac did not start (Spotify's last state) is known only
+            // by its URI: no tracks, so the start is not taken for its top.
             let tracks = if self.started_tracks.contains(&uri) {
                 self.started_tracks.clone()
+            } else if context.is_some() {
+                Vec::new()
             } else {
                 vec![uri.clone()]
             };
