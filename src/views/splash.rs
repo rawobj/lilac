@@ -231,7 +231,10 @@ fn sprig() -> impl IntoElement {
                                 } else {
                                     ease_out_back(local)
                                 };
-                                el.size(px(2.0 * r * grow.max(0.0))).opacity(local.min(1.0))
+                                // Never zero: the renderer refuses an empty
+                                // SVG, and says so every frame.
+                                el.size(px((2.0 * r * grow).max(1.0)))
+                                    .opacity(local.min(1.0))
                             },
                         )
                         .child(
