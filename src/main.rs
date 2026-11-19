@@ -5,6 +5,7 @@ mod assets;
 mod disk_cache;
 mod feed;
 mod friends;
+mod history;
 mod images;
 mod keys;
 mod library;

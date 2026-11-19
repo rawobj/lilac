@@ -5,14 +5,21 @@ use gpui_kit::*;
 use super::{album_card, artist_card, playlist_card, scroll_page, show_card};
 use crate::actions;
 use crate::app;
+use crate::disk_cache;
+use crate::history;
 use crate::model::*;
 use crate::nav::Route;
 use crate::player::PlayerEvent;
 use crate::runtime;
+use crate::spotify::streaming;
 use crate::theme;
 use crate::ui::card::shelf;
 use crate::ui::track_row::{RowOptions, track_row};
 use crate::ui::{self, Placeholder, icons};
+
+/// Home's shelves are asked of Spotify again only after this.
+const HOME_FRESH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+const HOME_KEY: &str = "home";
 
 pub struct HomePage {
     recent: Vec<Track>,
@@ -47,37 +54,227 @@ impl HomePage {
         this
     }
 
+    /// Show the shelves as last seen at once, and ask Spotify for new ones
+    /// only when those are older than [`HOME_FRESH`]: every shelf is a Web
+    /// API request, and Home opens often.
     fn load(&mut self, cx: &mut Context<Self>) {
-        macro_rules! fetch {
-            ($field:ident, $call:expr) => {{
-                let api = app::api(cx);
-                cx.spawn(async move |this, cx| {
-                    let result = runtime::run(async move { $call(api).await }).await;
-                    this.update(cx, |this, cx| {
-                        // A shelf that fails to load is simply left out.
-                        if let Ok(items) = result {
-                            this.$field = items;
-                        }
-                        this.loaded = true;
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-            }};
+        let demo = app::api(cx).is_demo();
+        cx.spawn(async move |this, cx| {
+            let kept = if demo {
+                None
+            } else {
+                cx.background_executor()
+                    .spawn(async move { disk_cache::HOME.get(HOME_KEY) })
+                    .await
+            };
+            let fresh = kept.as_ref().is_some_and(|hit| hit.age < HOME_FRESH);
+            this.update(cx, |this, cx| {
+                if let Some(hit) = kept {
+                    this.apply_kept(&hit.value);
+                    cx.notify();
+                }
+                // Lilac's own history is always current and costs nothing.
+                let local = if demo {
+                    Vec::new()
+                } else {
+                    history::recent(20)
+                };
+                if !local.is_empty() {
+                    this.recent = local;
+                    this.loaded = true;
+                    cx.notify();
+                }
+                if !fresh {
+                    this.fetch(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_kept(&mut self, value: &serde_json::Value) {
+        fn list<T: serde::de::DeserializeOwned>(value: &serde_json::Value, key: &str) -> Vec<T> {
+            serde_json::from_value(value.get(key).cloned().unwrap_or_default()).unwrap_or_default()
         }
-        fetch!(recent, |api: crate::spotify::api::Api| async move {
-            api.recently_played().await
+        self.recent = list(value, "recent");
+        self.top_artists = list(value, "top_artists");
+        self.top_tracks = list(value, "top_tracks");
+        self.new_releases = list(value, "new_releases");
+        self.loaded = true;
+    }
+
+    /// Every shelf asks Spotify's Web API first and keeps what it had when
+    /// that fails, with Lilac's own data standing in where nothing was
+    /// kept: its play history (recently played, most played songs and
+    /// artists) and the followed artists' releases through the streaming
+    /// session. No shelf is left empty for want of the Web API.
+    fn fetch(&mut self, cx: &mut Context<Self>) {
+        let api = app::api(cx);
+        let demo = api.is_demo();
+        let followed: Vec<String> = app::library(cx)
+            .read(cx)
+            .artists
+            .iter()
+            .map(|a| a.id.to_string())
+            .collect();
+
+        // Recently played: Lilac's own history is on screen already (see
+        // `load`); Spotify's, which includes other devices, replaces it when
+        // it can be had.
+        let recent_api = api.clone();
+        self.fetch_shelf(
+            cx,
+            async move { recent_api.recently_played().await },
+            |this, items| {
+                if !items.is_empty() {
+                    this.recent = items;
+                }
+            },
+        );
+
+        // New releases: Spotify's; when the Web API fails, the followed
+        // artists' releases through the streaming session.
+        let releases_api = api.clone();
+        self.fetch_shelf(
+            cx,
+            async move {
+                match releases_api.new_releases().await {
+                    Ok(albums) => Ok(albums),
+                    Err(err) if demo || followed.is_empty() => Err(err),
+                    Err(_) => {
+                        let mut albums = streaming::latest_releases(&followed).await?;
+                        albums.sort_by(|a, b| b.release_date.cmp(&a.release_date));
+                        albums.truncate(20);
+                        Ok(albums)
+                    }
+                }
+            },
+            |this, items| this.new_releases = items,
+        );
+
+        // Listening stats: the Web API, else Lilac's own history.
+        let stats = api.clone();
+        cx.spawn(async move |this, cx| {
+            let (artists, tracks) = runtime::run(async move {
+                Ok(tokio::join!(
+                    stats.top_artists("short_term", 12),
+                    stats.top_tracks("short_term", 8)
+                ))
+            })
+            .await
+            .unwrap_or_else(|err| (Err(anyhow::anyhow!("{err}")), Err(anyhow::anyhow!("{err}"))));
+            let artists_failed = artists.is_err();
+            this.update(cx, |this, cx| {
+                if let Ok(items) = artists {
+                    this.top_artists = items;
+                }
+                match tracks {
+                    Ok(items) => this.top_tracks = items,
+                    Err(_) if this.top_tracks.is_empty() && !demo => {
+                        let local = history::top_tracks(28, 8);
+                        this.top_tracks = if local.is_empty() {
+                            app::library(cx)
+                                .read(cx)
+                                .liked
+                                .iter()
+                                .take(8)
+                                .cloned()
+                                .collect()
+                        } else {
+                            local
+                        };
+                    }
+                    Err(_) => {}
+                }
+                this.loaded = true;
+                this.persist(cx);
+                cx.notify();
+                if artists_failed && this.top_artists.is_empty() && !demo {
+                    this.local_top_artists(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Top artists from Lilac's play history (pictures through the
+    /// streaming session), else the followed artists.
+    fn local_top_artists(&mut self, cx: &mut Context<Self>) {
+        let ranked = history::top_artists(28, 12);
+        if ranked.is_empty() {
+            self.top_artists = app::library(cx)
+                .read(cx)
+                .artists
+                .iter()
+                .take(12)
+                .cloned()
+                .collect();
+            cx.notify();
+            return;
+        }
+        let uris: Vec<String> = ranked
+            .iter()
+            .map(|a| format!("spotify:artist:{}", a.id))
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let found = runtime::run(async move { streaming::artists_by_uri(&uris).await }).await;
+            this.update(cx, |this, cx| {
+                this.top_artists = match found {
+                    Ok(artists) if !artists.is_empty() => artists,
+                    _ => ranked
+                        .into_iter()
+                        .map(|a| Artist {
+                            id: a.id.clone(),
+                            uri: format!("spotify:artist:{}", a.id).into(),
+                            name: a.name,
+                            ..Default::default()
+                        })
+                        .collect(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Load one shelf; one that fails keeps what was kept (or is left out).
+    fn fetch_shelf<T: Send + 'static>(
+        &mut self,
+        cx: &mut Context<Self>,
+        call: impl std::future::Future<Output = anyhow::Result<Vec<T>>> + Send + 'static,
+        apply: impl FnOnce(&mut Self, Vec<T>) + 'static,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = runtime::run(call).await;
+            this.update(cx, |this, cx| {
+                if let Ok(items) = result {
+                    apply(this, items);
+                    this.persist(cx);
+                }
+                this.loaded = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn persist(&self, cx: &mut Context<Self>) {
+        if app::api(cx).is_demo() {
+            return;
+        }
+        let value = serde_json::json!({
+            "recent": self.recent.iter().map(Track::to_api_json).collect::<Vec<_>>(),
+            "top_artists": self.top_artists.iter().map(Artist::to_api_json).collect::<Vec<_>>(),
+            "top_tracks": self.top_tracks.iter().map(Track::to_api_json).collect::<Vec<_>>(),
+            "new_releases": self.new_releases.iter().map(Album::to_api_json).collect::<Vec<_>>(),
         });
-        fetch!(top_artists, |api: crate::spotify::api::Api| async move {
-            api.top_artists("short_term", 12).await
-        });
-        fetch!(top_tracks, |api: crate::spotify::api::Api| async move {
-            api.top_tracks("short_term", 8).await
-        });
-        fetch!(new_releases, |api: crate::spotify::api::Api| async move {
-            api.new_releases().await
-        });
+        cx.background_executor()
+            .spawn(async move { disk_cache::HOME.put(HOME_KEY, &value) })
+            .detach();
     }
 
     /// The grid of quick links at the top, like the official home screen.

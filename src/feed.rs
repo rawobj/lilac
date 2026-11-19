@@ -2,8 +2,10 @@
 //! followed shows.
 //!
 //! Spotify builds this feed server-side for its own clients only, so it is
-//! assembled here from the Web API. Loading starts a little after login, not
-//! at startup, and the request fan-out is bounded.
+//! assembled here: the followed artists and shows come from the library
+//! Lilac already has, the artists' releases from the streaming session in
+//! two batched lookups. Only new episodes of shows ask the Web API, one
+//! request per show. Loading starts a little after login, not at startup.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -96,9 +98,20 @@ impl Feed {
                 cx.background_executor().timer(delay).await;
             }
             let demo = api.is_demo();
+            // What the library knows; the Web API only before it has loaded.
+            let known = cx
+                .update(|cx| {
+                    let library = app::library(cx).read(cx);
+                    library.loaded.then(|| {
+                        let artists: Vec<String> =
+                            library.artists.iter().map(|a| a.id.to_string()).collect();
+                        (artists, library.shows.clone())
+                    })
+                })
+                .filter(|_| !demo);
             let result = runtime::run(async move {
                 let cutoff = (!demo).then(|| date_days_ago(WINDOW_DAYS));
-                Ok(build(api, cutoff).await)
+                Ok(build(api, known, cutoff).await)
             })
             .await;
             this.update(cx, |this, cx| {
@@ -114,19 +127,42 @@ impl Feed {
     }
 }
 
-async fn build(api: crate::spotify::api::Api, cutoff: Option<String>) -> Vec<FeedItem> {
-    let (artists, shows) = tokio::join!(api.followed_artists(), api.saved_shows());
-    let artists = artists.unwrap_or_default();
-    let shows = shows.unwrap_or_default();
+async fn build(
+    api: crate::spotify::api::Api,
+    known: Option<(Vec<String>, Vec<crate::model::Show>)>,
+    cutoff: Option<String>,
+) -> Vec<FeedItem> {
+    let (artists, shows) = match known {
+        Some(known) => known,
+        None => {
+            let (artists, shows) = tokio::join!(api.followed_artists(), api.saved_shows());
+            let artists = artists
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.id.to_string())
+                .collect();
+            (artists, shows.unwrap_or_default())
+        }
+    };
     let recent = |date: &str| cutoff.as_deref().is_none_or(|cutoff| date >= cutoff);
+    let artists: Vec<String> = artists.into_iter().take(MAX_ARTISTS).collect();
 
     let mut items = Vec::new();
+    // Releases from the streaming session; one Web API request per artist
+    // only when that fails.
+    let mut jobs: Vec<Job> = Vec::new();
+    match crate::spotify::streaming::latest_releases(&artists).await {
+        Ok(albums) if !api.is_demo() => items.extend(
+            albums
+                .into_iter()
+                .map(FeedItem::Release)
+                .filter(|item| recent(item.date())),
+        ),
+        _ => jobs.extend(artists.into_iter().map(|id| Job::Artist(id.into()))),
+    }
+    jobs.extend(shows.into_iter().take(MAX_SHOWS).map(Job::Show));
     let mut tasks = tokio::task::JoinSet::new();
-    let mut jobs = artists
-        .into_iter()
-        .take(MAX_ARTISTS)
-        .map(|artist| Job::Artist(artist.id))
-        .chain(shows.into_iter().take(MAX_SHOWS).map(Job::Show));
+    let mut jobs = jobs.into_iter();
     let spawn = |tasks: &mut tokio::task::JoinSet<Vec<FeedItem>>, job: Job| {
         let api = api.clone();
         tasks.spawn(async move {

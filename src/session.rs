@@ -151,6 +151,7 @@ impl Session {
             crate::playlist_cache::clear();
             crate::library_cache::clear();
             crate::disk_cache::clear();
+            crate::history::clear();
             let _ = std::fs::remove_file(profile_file());
             let (web, streaming) = (self.api.auth.clone(), self.streaming.clone());
             runtime::spawn(async move {

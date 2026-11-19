@@ -32,6 +32,8 @@ pub static ALBUMS: Store = Store::new("albums", 60, 2_000);
 pub static LYRICS: Store = Store::new("lyrics", 180, 10_000);
 /// Artist pages: profile, sections and overview.
 pub static ARTISTS: Store = Store::new("artists", 30, 1_000);
+/// The Home page's shelves (one record).
+pub static HOME: Store = Store::new("home", 7, 4);
 
 /// Prune every this many writes, not on each one.
 const PRUNE_EVERY: u32 = 200;
@@ -120,7 +122,7 @@ impl Store {
 
 /// Forget everything, e.g. on logout.
 pub fn clear() {
-    for store in [&TRACKS, &ALBUMS, &LYRICS, &ARTISTS] {
+    for store in [&TRACKS, &ALBUMS, &LYRICS, &ARTISTS, &HOME] {
         let _ = std::fs::remove_dir_all(store.dir());
     }
 }

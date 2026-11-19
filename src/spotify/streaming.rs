@@ -1218,6 +1218,42 @@ pub async fn playlist_covers(ids: Vec<String>) -> Result<Vec<(String, crate::mod
         .collect())
 }
 
+/// Releases per end of an artist's album and single lists looked at for
+/// [`latest_releases`]. Spotify does not say which end is newest, so both
+/// ends are read.
+const LATEST_PER_END: usize = 4;
+
+/// Recent albums and singles of several artists, for "What's New": two
+/// batched lookups for all of them (artists, then their releases) instead
+/// of one Web API request per artist.
+pub async fn latest_releases(artist_ids: &[String]) -> Result<Vec<Album>> {
+    let artist_uris: Vec<SpotifyUri> = artist_ids
+        .iter()
+        .filter_map(|id| SpotifyUri::from_uri(&format!("spotify:artist:{id}")).ok())
+        .collect();
+    let artists: Vec<RawArtist> = get_many(ExtensionKind::ARTIST_V4, &artist_uris).await?;
+    let mut releases: Vec<SpotifyUri> = Vec::new();
+    for artist in &artists {
+        for groups in [&artist.albums, &artist.singles] {
+            let firsts: Vec<&SpotifyUri> = groups.iter().filter_map(|g| g.0.first()).collect();
+            let ends = firsts
+                .iter()
+                .take(LATEST_PER_END)
+                .chain(firsts.iter().rev().take(LATEST_PER_END));
+            for uri in ends {
+                if !releases.contains(uri) {
+                    releases.push((*uri).clone());
+                }
+            }
+        }
+    }
+    Ok(get_many::<RawAlbum>(ExtensionKind::ALBUM_V4, &releases)
+        .await?
+        .iter()
+        .filter_map(|album| serde_json::from_value(album_json(album)).ok())
+        .collect())
+}
+
 /// One track's details (kept on disk like any other; see [`tracks`]).
 pub async fn track(uri: &str) -> Result<Track> {
     let uri = SpotifyUri::from_uri(uri)?;

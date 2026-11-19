@@ -2051,6 +2051,9 @@ impl Player {
                 // Shown at once; the Web API's copy follows, with names in
                 // the user's language (Soloist's are untranslated).
                 let (uri, duration) = (track.uri.to_string(), track.duration_ms);
+                if self.playing {
+                    crate::history::record(&track);
+                }
                 self.current = Some(track);
                 cx.emit(PlayerEvent::TrackChanged);
                 self.look_up_current(uri, duration, cx);
@@ -2164,6 +2167,9 @@ impl Player {
             .find(|t| t.uri.as_ref() == audio_item.uri)
             .cloned();
         self.current = Some(known.unwrap_or_else(|| track_from_audio_item(audio_item)));
+        if let Some(track) = &self.current {
+            crate::history::record(track);
+        }
         self.anchor(0);
         self.save_session(cx);
         // Spotify does not push our own changes; read what comes next.
@@ -2348,6 +2354,9 @@ impl Player {
                 });
                 if track.duration_ms == 0 {
                     track.duration_ms = duration_ms;
+                }
+                if this.soloist_active(cx) && this.playing {
+                    crate::history::record(&track);
                 }
                 this.current = Some(track);
                 cx.emit(PlayerEvent::TrackChanged);
