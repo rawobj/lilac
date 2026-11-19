@@ -241,6 +241,35 @@ impl Render for SettingsPage {
                 ),
         ));
 
+        let help = section("Help & diagnostics")
+            .child(row(
+                "Test report",
+                "Checks what Lilac needs from Spotify on this computer and account, and saves the results to your Downloads folder to send back. Anonymous: no account name, email or password.",
+                ui::pill_button("test-report", "Create", true)
+                    .on_click(|_, _, cx| crate::selftest::run(cx)),
+            ))
+            .child(row(
+                "Crash reports",
+                "Saved automatically when Lilac stops on an error, with its recent log.",
+                ui::pill_button("crash-reports", "Open folder", false).on_click(|_, _, cx| {
+                    let dir = crate::diagnostics::crashes_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    if open::that_detached(&dir).is_err() {
+                        app::toast_error("Could not open the folder", cx);
+                    }
+                }),
+            ))
+            .child(row(
+                "Log",
+                "What Lilac and its libraries reported recently.",
+                ui::pill_button("log-folder", "Open folder", false).on_click(|_, _, cx| {
+                    let dir = crate::diagnostics::logs_dir();
+                    if open::that_detached(&dir).is_err() {
+                        app::toast_error("Could not open the folder", cx);
+                    }
+                }),
+            ));
+
         let about = section("About")
             .child(row(
                 "Keyboard shortcuts",
@@ -279,6 +308,7 @@ impl Render for SettingsPage {
                 .child(display)
                 .child(integration)
                 .child(storage)
+                .child(help)
                 .child(about),
         )
     }

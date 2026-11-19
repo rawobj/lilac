@@ -318,6 +318,47 @@ pub fn dialog(
             None,
         ),
         Dialog::SoloistSetup => super::soloist_setup::render(soloist_key, cx),
+        Dialog::LastRun(last) => {
+            let (title, what) = match &last {
+                crate::diagnostics::LastRun::Crashed(_) => (
+                    "Lilac closed unexpectedly",
+                    "Lilac ran into an error last time and had to close. It saved a report of what happened.",
+                ),
+                crate::diagnostics::LastRun::Vanished(_) => (
+                    "Lilac didn't close properly",
+                    "Last time, Lilac ended without closing normally. It saved a report from its log.",
+                ),
+            };
+            let report = last.path().to_path_buf();
+            (
+                title,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .text_color(theme::text_muted())
+                    .child(what)
+                    .child(
+                        "Sending it to whoever gave you Lilac helps fix it. The report holds no account name, \
+                         email or password: only what Lilac was doing, your system's name and version, and the error.",
+                    )
+                    .into_any_element(),
+                Some(
+                    ui::pill_button("confirm", "Save report to send", true)
+                        .on_click(move |_, _, cx| {
+                            match crate::diagnostics::hand_over(&report) {
+                                Some(saved) => app::toast(
+                                    format!("Saved as {} in your Downloads folder", saved.file_name().unwrap_or_default().to_string_lossy()),
+                                    cx,
+                                ),
+                                None => app::toast_error("Could not save the report", cx),
+                            }
+                            app::ui(cx).update(cx, |ui, cx| ui.close_dialog(cx));
+                        })
+                        .into_any_element(),
+                ),
+            )
+        }
         Dialog::SoloistExpired => {
             let soloist = app::soloist(cx).read(cx);
             let (version, expired_on) = soloist

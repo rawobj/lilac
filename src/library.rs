@@ -264,7 +264,7 @@ impl Library {
                         cx.notify();
                     }
                     Err(err) => {
-                        eprintln!(
+                        crate::note!(
                             "lilac: {} from the collection service failed: {err:#}",
                             set.name()
                         );
@@ -427,7 +427,7 @@ impl Library {
                 match streaming::rootlist().await {
                     Ok(list) => Ok(list),
                     Err(err) => {
-                        eprintln!("lilac: playlists from the session failed: {err:#}");
+                        crate::note!("lilac: playlists from the session failed: {err:#}");
                         api.my_playlists().await
                     }
                 }

@@ -140,7 +140,7 @@ impl Api {
                     continue;
                 }
                 if let Err(err) = streaming::collection_write(set, &group, saved).await {
-                    eprintln!("lilac: saving through the library service failed: {err:#}");
+                    crate::note!("lilac: saving through the library service failed: {err:#}");
                     rest.extend(group);
                 }
             }

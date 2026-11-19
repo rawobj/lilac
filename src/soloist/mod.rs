@@ -148,6 +148,9 @@ impl EventEmitter<SoloistEvent> for Soloist {}
 impl Soloist {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let store = Store::load();
+        if let Some(key) = &store.api_key {
+            crate::diagnostics::private(key);
+        }
         let mut this = Self {
             store,
             install: Install::Idle,
@@ -331,6 +334,7 @@ impl Soloist {
 
     pub fn set_api_key(&mut self, key: String, cx: &mut Context<Self>) {
         let key = key.trim().to_string();
+        crate::diagnostics::private(&key);
         self.store.api_key = (!key.is_empty()).then_some(key);
         self.store.save();
         // A running Soloist keeps the key it started with.

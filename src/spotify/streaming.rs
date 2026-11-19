@@ -1131,6 +1131,29 @@ pub async fn show_episodes(show: &crate::model::Show, offset: u32) -> Result<Pag
     }))?)
 }
 
+/// For the test report: whether a track has 30-second preview clips, and
+/// the size of the first one fetched (librespot's `get_audio_preview`).
+/// What a free account could play.
+pub async fn preview_probe(uri: &str) -> Result<(usize, usize)> {
+    let uri = SpotifyUri::from_uri(uri)?;
+    let track: RawTrack = get_many(ExtensionKind::TRACK_V4, &[uri])
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("track not found"))?;
+    let files = track.previews.len();
+    let Some(file) = track.previews.values().next() else {
+        return Ok((0, 0));
+    };
+    let session = session().await?;
+    let bytes = session.spclient().get_audio_preview(file).await?;
+    Ok((files, bytes.len()))
+}
+
+/// For the test report: the background connection is up (waits for it).
+pub async fn connected() -> Result<()> {
+    session().await.map(|_| ())
+}
+
 /// Playlists read at once while making covers.
 const COVER_PARALLEL: usize = 4;
 

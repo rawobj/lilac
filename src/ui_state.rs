@@ -99,6 +99,8 @@ pub enum Dialog {
     ArtistAbout {
         id: SharedString,
     },
+    /// The last run crashed or ended without closing; its report is saved.
+    LastRun(crate::diagnostics::LastRun),
 }
 
 pub struct UiState {
@@ -244,7 +246,11 @@ impl UiState {
     }
 
     pub fn close_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.dialog.take().is_some() {
+        if let Some(dialog) = self.dialog.take() {
+            // A report offered once is not offered again.
+            if let Dialog::LastRun(last) = dialog {
+                crate::diagnostics::mark_seen(last.path());
+            }
             cx.notify();
         }
     }

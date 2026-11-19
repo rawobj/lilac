@@ -180,6 +180,7 @@ impl Session {
             // player and library have subscribed.
             cx.spawn(async move |this, cx| {
                 this.update(cx, |this, cx| {
+                    crate::diagnostics::private_user(&user);
                     this.user = Some(user);
                     this.status = Status::LoggedIn;
                     this.error = None;
@@ -198,6 +199,7 @@ impl Session {
             this.update(cx, |this, cx| match result {
                 Ok(user) => {
                     save_profile(&user);
+                    crate::diagnostics::private_user(&user);
                     this.user = Some(user);
                     this.status = Status::LoggedIn;
                     this.error = None;
@@ -236,7 +238,7 @@ impl Session {
                 match streaming::profile().await {
                     Ok(user) => Ok(user),
                     Err(err) => {
-                        eprintln!("lilac: profile from the session failed: {err:#}");
+                        crate::note!("lilac: profile from the session failed: {err:#}");
                         api.me().await
                     }
                 }
@@ -248,6 +250,7 @@ impl Session {
                         return;
                     }
                     save_profile(&user);
+                    crate::diagnostics::private_user(&user);
                     this.user = Some(user);
                     cx.notify();
                 }

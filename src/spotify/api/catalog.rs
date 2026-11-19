@@ -87,7 +87,7 @@ impl Api {
         let (album, tracks) = match streaming::album(id).await {
             Ok(found) => found,
             Err(err) => {
-                eprintln!("lilac: album from the session failed: {err:#}");
+                crate::note!("lilac: album from the session failed: {err:#}");
                 let album = self.album(id).await?;
                 let tracks = self.album_tracks(&album).await?;
                 (album, tracks)
@@ -108,7 +108,7 @@ impl Api {
         if !self.is_demo() {
             match streaming::playlist(id).await {
                 Ok(playlist) => return Ok(playlist),
-                Err(err) => eprintln!("lilac: playlist from the session failed: {err:#}"),
+                Err(err) => crate::note!("lilac: playlist from the session failed: {err:#}"),
             }
         }
         self.get(&format!("/playlists/{id}")).await

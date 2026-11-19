@@ -2,6 +2,7 @@ mod actions;
 mod app;
 mod artists;
 mod assets;
+mod diagnostics;
 mod disk_cache;
 mod feed;
 mod friends;
@@ -24,6 +25,7 @@ mod playlist_cache;
 mod romanize;
 mod runtime;
 mod search;
+mod selftest;
 mod session;
 mod settings;
 mod single_instance;
@@ -43,6 +45,7 @@ fn main() {
         // The running Lilac brings its window to the front.
         return;
     };
+    diagnostics::init();
     #[cfg(target_os = "linux")]
     name_audio_stream();
     #[cfg(target_os = "linux")]
@@ -78,6 +81,17 @@ fn main() {
             })
             .expect("failed to open window");
             cx.activate(true);
+            cx.on_app_quit(|_| {
+                diagnostics::clean_exit();
+                async {}
+            })
+            .detach();
+            // The last run crashed or ended without closing: offer its report.
+            if let Some(last) = diagnostics::last_run() {
+                app::ui(cx).update(cx, |ui, cx| {
+                    ui.open_dialog(ui_state::Dialog::LastRun(last), cx)
+                });
+            }
 
             cx.spawn(async move |cx| {
                 while show_requests.recv().await.is_some() {
