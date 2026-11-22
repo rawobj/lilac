@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ui_state::{Dialog, ToastKind};
-use crate::{app, notify, paths, runtime};
+use crate::{app, notify, paths, process, runtime};
 use build::{Build, Reminder};
 
 /// Stands for Soloist's Connect id until Spotify's device list gives the
@@ -379,7 +379,7 @@ impl Soloist {
         let _ = std::fs::remove_file(data.join("ws.addr"));
 
         let volume = (app::settings(cx).read(cx).volume * 100.0).round() as u32;
-        let mut command = Command::new(binary());
+        let mut command = process::background(binary());
         end_with_us(&mut command);
         let mut child = command
             .args(["--device-name", DEVICE_NAME, "--api-key", &key])
@@ -1095,7 +1095,7 @@ fn is_soloist(pid: u32) -> bool {
             .is_ok_and(|exe| exe.file_name().is_some_and(|n| n.to_string_lossy() == name));
     }
     let output = if cfg!(windows) {
-        Command::new("tasklist")
+        process::background("tasklist")
             .args(["/NH", "/FI", &format!("PID eq {pid}")])
             .output()
     } else {
@@ -1113,7 +1113,7 @@ fn terminate(pid: u32) {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
     #[cfg(windows)]
-    let _ = Command::new("taskkill")
+    let _ = process::background("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output();
 }
@@ -1205,7 +1205,7 @@ async fn download(
     tokio::task::spawn_blocking(move || -> Result<Downloaded> {
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
-        let status = Command::new("tar")
+        let status = process::background("tar")
             .arg("-xf")
             .arg(&archive)
             .arg("-C")
@@ -1217,7 +1217,7 @@ async fn download(
             bail!("the downloaded archive could not be unpacked");
         }
         let exe = staging.join(binary().file_name().unwrap_or_default());
-        let output = Command::new(&exe)
+        let output = process::background(&exe)
             .arg("--version")
             .output()
             .context("the downloaded Soloist does not run on this system")?;

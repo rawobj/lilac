@@ -29,6 +29,14 @@ pub fn config_dir() -> PathBuf {
 /// Data that can be fetched again: `$XDG_CACHE_HOME/lilac` or the platform's
 /// equivalent.
 pub fn cache_dir() -> PathBuf {
+    // On Windows the data folder is also under %LOCALAPPDATA%; keep the
+    // cache apart from it.
+    if cfg!(windows)
+        && std::env::var_os("XDG_CACHE_HOME").is_none()
+        && let Some(local) = std::env::var_os("LOCALAPPDATA")
+    {
+        return PathBuf::from(local).join(APP_DIR).join("cache");
+    }
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

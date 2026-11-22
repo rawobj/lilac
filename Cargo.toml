@@ -5,6 +5,9 @@ edition = "2024"
 description = "A fast, native Spotify client written in Rust with GPUI"
 license = "MIT"
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [dependencies]
 gpui-kit = "=0.8.0"
 anyhow = "1.0.104"

@@ -3973,6 +3973,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "embed-resource",
  "futures-util",
  "getrandom 0.3.4",
  "gpui-kit",

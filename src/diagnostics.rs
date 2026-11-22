@@ -361,7 +361,7 @@ pub fn system() -> String {
             })
             .unwrap_or_default()
     } else if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd")
+        crate::process::background("cmd")
             .args(["/C", "ver"])
             .output()
             .ok()
