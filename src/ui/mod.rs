@@ -4,6 +4,7 @@ pub mod card;
 pub mod icons;
 pub mod slider;
 pub mod track_row;
+pub mod window_frame;
 
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;

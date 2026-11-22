@@ -21,6 +21,7 @@ use crate::nav::Route;
 use crate::panels::RightPanelView;
 use crate::session::Status;
 use crate::theme;
+use crate::ui::window_frame;
 use crate::ui_state::Dialog;
 use crate::ui_state::RightPanel;
 
@@ -330,6 +331,7 @@ impl Render for Lilac {
             (ui.immersive, ui.sidebar_collapsed, ui.right_panel)
         };
 
+        let top_bar_hidden = status != Status::LoggedIn || immersive || self.splash.is_some();
         let content = match status {
             // Covered by the loading screen.
             Status::Starting => div().into_any_element(),
@@ -430,6 +432,12 @@ impl Render for Lilac {
             ))
             .children(overlays::toasts(cx))
             .children(self.splash.clone())
+            // The top bar carries the window buttons; screens without it
+            // (and the loading screen over it) get them in the corner.
+            .when(top_bar_hidden, |root| {
+                root.children(window_frame::corner_buttons(window))
+            })
+            .children(window_frame::resize_edges(window))
     }
 }
 

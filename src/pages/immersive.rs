@@ -5,7 +5,7 @@ use gpui_kit::*;
 use crate::app;
 use crate::model::format_duration;
 use crate::theme;
-use crate::ui::{self, Placeholder, WithTooltip, icons};
+use crate::ui::{self, Placeholder, WithTooltip, icons, window_frame};
 
 pub fn render(window: &Window, cx: &mut App) -> Div {
     let player = app::player(cx);
@@ -28,11 +28,13 @@ pub fn render(window: &Window, cx: &mut App) -> Div {
         .size(px(40.0))
         .tip("Exit immersive mode")
         .on_click(|_, _, cx| app::ui(cx).update(cx, |ui, cx| ui.toggle_immersive(cx)));
+    // Left of the window buttons when Lilac draws them.
+    let exit_right = 16.0 + window_frame::corner_reserve(window);
 
     let Some(track) = track else {
         return div()
             .size_full()
-            .child(div().absolute().top_4().right_4().child(exit))
+            .child(div().absolute().top_4().right(px(exit_right)).child(exit))
             .child(ui::empty_state(
                 icons::MUSIC,
                 "Nothing playing",
@@ -51,7 +53,7 @@ pub fn render(window: &Window, cx: &mut App) -> Div {
                 .top(px(120.0))
                 .left(px(160.0)),
         )
-        .child(div().absolute().top_4().right_4().child(exit))
+        .child(div().absolute().top_4().right(px(exit_right)).child(exit))
         .child(
             div()
                 .relative()

@@ -7,6 +7,7 @@ use gpui_kit::*;
 use crate::app;
 use crate::nav::Route;
 use crate::theme;
+use crate::ui::window_frame::{self, DragsWindow as _};
 use crate::ui::{self, Placeholder, WithTooltip, icons};
 use crate::ui_state::{Dialog, MenuItem, RightPanel};
 
@@ -71,39 +72,22 @@ impl TopBar {
     }
 }
 
-/// Keep a press on a control from also starting a window drag.
-fn no_drag(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
-    cx.stop_propagation();
+/// Keep a press on a control from also starting a window drag (`occlude`
+/// does the same for the Windows hit test).
+trait NoDrag: InteractiveElement + Sized {
+    fn no_drag(self) -> Self {
+        self.occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
 }
+
+impl<E: InteractiveElement> NoDrag for E {}
 
 fn nav_button(id: &'static str, icon: &'static str, enabled: bool) -> Stateful<Div> {
     ui::icon_button(id, icon)
-        .on_mouse_down(MouseButton::Left, no_drag)
+        .no_drag()
         .bg(theme::black(0.25))
         .when(!enabled, |b| b.opacity(0.35).cursor_default())
-}
-
-fn window_button(id: &'static str, icon: &'static str, danger: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .size(px(28.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .hover(move |s| {
-            s.bg(if danger {
-                theme::danger().opacity(0.8)
-            } else {
-                theme::hover_fill()
-            })
-        })
-        .child(
-            svg()
-                .path(icon)
-                .size(px(14.0))
-                .text_color(theme::text_muted()),
-        )
 }
 
 impl Render for TopBar {
@@ -120,7 +104,6 @@ impl Render for TopBar {
         };
         let user = app::session(cx).read(cx).user.clone();
         let avatar = user.as_ref().and_then(|u| u.images.for_size(32));
-        let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
         let at_whats_new = *app::nav(cx).read(cx).current() == Route::WhatsNew;
         let friends_open = app::ui(cx).read(cx).right_panel == RightPanel::Friends;
         let has_new = {
@@ -135,13 +118,7 @@ impl Render for TopBar {
             .flex()
             .items_center()
             .gap_2()
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
+            .drags_window()
             .child(
                 div()
                     .flex_1()
@@ -190,7 +167,7 @@ impl Render for TopBar {
                                     }),
                             )
                             .tip("Home")
-                            .on_mouse_down(MouseButton::Left, no_drag)
+                            .no_drag()
                             .on_click(|_, _, cx| app::navigate(Route::Home, cx)),
                     )
                     .child(
@@ -213,7 +190,7 @@ impl Render for TopBar {
                             })
                             .hover(|s| s.bg(theme::active_fill()))
                             // Clicks belong to the field, not to the window drag region.
-                            .on_mouse_down(MouseButton::Left, no_drag)
+                            .no_drag()
                             .child(
                                 svg()
                                     .path(icons::SEARCH)
@@ -236,7 +213,7 @@ impl Render for TopBar {
                             .child(
                                 ui::toggle_icon_button("whats-new", icons::BELL, at_whats_new)
                                     .tip("What's New")
-                                    .on_mouse_down(MouseButton::Left, no_drag)
+                                    .no_drag()
                                     .on_click(|_, _, cx| {
                                         app::nav(cx)
                                             .update(cx, |nav, cx| nav.toggle(Route::WhatsNew, cx))
@@ -259,7 +236,7 @@ impl Render for TopBar {
                     .child(
                         ui::toggle_icon_button("friends", icons::USERS, friends_open)
                             .tip("Friend Activity")
-                            .on_mouse_down(MouseButton::Left, no_drag)
+                            .no_drag()
                             .on_click(|_, _, cx| {
                                 app::ui(cx)
                                     .update(cx, |ui, cx| ui.toggle_panel(RightPanel::Friends, cx))
@@ -275,31 +252,10 @@ impl Render for TopBar {
                             .hover(|s| s.bg(theme::active_fill()))
                             .child(ui::cover(avatar, 30.0, 15.0, Placeholder::User, window, cx))
                             .tip("Account")
-                            .on_mouse_down(MouseButton::Left, no_drag)
+                            .no_drag()
                             .on_click(|event, _, cx| Self::account_menu(event.position(), cx)),
                     )
-                    .when(client_decorated, |row| {
-                        row.child(
-                            div()
-                                .ml_2()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .on_mouse_down(MouseButton::Left, no_drag)
-                                .child(
-                                    window_button("minimize", icons::MINUS, false)
-                                        .on_click(|_, window, _| window.minimize_window()),
-                                )
-                                .child(
-                                    window_button("maximize", icons::SQUARE, false)
-                                        .on_click(|_, window, _| window.zoom_window()),
-                                )
-                                .child(
-                                    window_button("close", icons::X, true)
-                                        .on_click(|_, window, _| window.remove_window()),
-                                ),
-                        )
-                    }),
+                    .children(window_frame::buttons(window).map(|b| b.ml_2())),
             )
     }
 }

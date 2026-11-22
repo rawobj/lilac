@@ -16,6 +16,7 @@ use crate::app;
 use crate::player::Warmup;
 use crate::theme;
 use crate::ui::icons;
+use crate::ui::window_frame::DragsWindow as _;
 
 /// Long enough for the bloom to finish.
 const MIN_SHOWN: Duration = Duration::from_millis(1100);
@@ -278,7 +279,7 @@ impl Render for Splash {
             .gap_6()
             .bg(theme::backdrop_opaque())
             .occlude()
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .drags_window()
             .child(
                 div()
                     .relative()

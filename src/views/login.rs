@@ -6,6 +6,7 @@ use crate::app;
 use crate::session::Status;
 use crate::theme;
 use crate::ui;
+use crate::ui::window_frame::DragsWindow as _;
 
 pub struct LoginView;
 
@@ -90,7 +91,7 @@ impl Render for LoginView {
             .items_center()
             .justify_center()
             // The whole screen moves the window; there is no title bar here.
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .drags_window()
             .child(
                 theme::glass()
                     .w(px(440.0))
