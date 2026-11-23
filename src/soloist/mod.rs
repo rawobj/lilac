@@ -597,6 +597,13 @@ impl Soloist {
             }
             ws::Event::Error(message) => app::toast_error(format!("Soloist: {message}"), cx),
             ws::Event::Status(_) => {}
+            ws::Event::Active(active) => {
+                if self.device_id.is_some() {
+                    cx.defer(move |cx| {
+                        app::player(cx).update(cx, |p, cx| p.on_soloist_active(active, cx))
+                    });
+                }
+            }
             // What plays is the player's to show; straight from Soloist,
             // it is exact and immediate (Spotify never echoes the changes
             // Lilac makes itself).

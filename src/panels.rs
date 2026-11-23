@@ -419,12 +419,26 @@ impl RightPanelView {
                 Some(a) if soloist.is_device(&a) => ours.clone(),
                 other => other,
             };
-            (player.devices.clone(), active, ours)
+            // The stand-in for a device Spotify is yet to name is no choice.
+            let devices = player
+                .devices
+                .iter()
+                .filter(|d| d.id != crate::player::OTHER_DEVICE)
+                .cloned()
+                .collect::<Vec<_>>();
+            (devices, active, ours)
         };
         // This computer counts as current when nothing else is playing.
         let current = active.clone().or_else(|| ours.clone());
         let row = |ix: usize, device: Option<&Device>| -> Stateful<Div> {
             let (id, name, kind) = match device {
+                // Spotify lists this computer under the name it registered
+                // (Soloist's own); it is shown as what it is to the user.
+                Some(d) if Some(&d.id) == ours.as_ref() => (
+                    Some(d.id.clone()),
+                    "This computer".to_string(),
+                    DeviceKind::Computer,
+                ),
                 Some(d) => (Some(d.id.clone()), d.name.clone(), d.kind),
                 None => (
                     ours.clone(),

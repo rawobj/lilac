@@ -14,6 +14,9 @@ pub enum Event {
         logged_in: bool,
         is_active: bool,
     },
+    /// Soloist became the device playing, or stopped being it. Nothing
+    /// else is sent when only the device changes.
+    Active(bool),
     /// Paused, playing, buffering or idle.
     Status(String),
     /// Everything about what plays, sent on every change.
@@ -171,6 +174,7 @@ pub fn parse(text: &str) -> Option<Event> {
             logged_in: raw.logged_in,
             is_active: raw.is_active,
         }),
+        "device_changed" => Some(Event::Active(raw.is_active)),
         "playback_changed" => raw.status.map(Event::Status),
         "queue_changed" => {
             let value: Value = serde_json::from_str(text).ok()?;
@@ -255,6 +259,10 @@ mod tests {
             Some(Event::Error("command requires authentication".into()))
         );
         assert_eq!(parse(r#"{"type":"volume_changed","volume":4}"#), None);
+        assert_eq!(
+            parse(r#"{"type":"device_changed","is_active":true,"device_name":"x"}"#),
+            Some(Event::Active(true))
+        );
         let Some(Event::Queue(upcoming)) = parse(
             r#"{"type":"queue_changed","previous":[],"upcoming":[{"uid":"a","source":"queue","item":{"uri":"spotify:track:05nN","decorations":{"identity":{"name":"Out of Time"}}}},{"uid":"b","source":"context","item":{"uri":"spotify:episode:9"}}]}"#,
         ) else {

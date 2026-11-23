@@ -72,9 +72,12 @@ impl PlayerBar {
             return div().flex_1();
         };
         let liked = app::library(cx).read(cx).is_liked(&track.id);
+        // Soloist plays for this computer; it is not "elsewhere".
+        let soloist = app::soloist(cx).read(cx);
         let listening_on = app::player(cx)
             .read(cx)
             .remote_device()
+            .filter(|d| !soloist.is_device(&d.id))
             .map(|d| d.name.clone());
         let album_id = track
             .album

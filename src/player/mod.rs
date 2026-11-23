@@ -30,6 +30,9 @@ use resume::LastSession;
 use sink::{Cue, OutputControl};
 
 /// Restart the current track instead of going to the previous one past this point.
+/// Stands in for the device playing until Spotify names it (see
+/// `Player::name_other_device`).
+pub const OTHER_DEVICE: &str = "lilac-other-device";
 const RESTART_THRESHOLD_MS: u32 = 3000;
 /// Give up waiting for the restored session after this; the loading screen
 /// must never hold the app hostage to a slow network.
@@ -119,6 +122,9 @@ pub struct Player {
     /// The built-in player stays off the network for now (while Soloist
     /// pairs, so a phone lists one Lilac to pick, not two).
     builtin_hidden: bool,
+    /// The device Lilac last moved playback to, and when: Soloist reports
+    /// that it lost the session, not to whom.
+    moving_to: Option<(String, Instant)>,
     /// When Lilac last started something on Soloist; a pause Soloist
     /// reports right after that was not asked for.
     soloist_started_at: Option<Instant>,
@@ -257,6 +263,7 @@ impl Player {
             ticker: None,
             backend: None,
             builtin_hidden: false,
+            moving_to: None,
             soloist_started_at: None,
             reader: None,
             reader_starting: None,
@@ -581,6 +588,23 @@ impl Player {
                 Start::Uri(uri) => Some(uri.clone()),
                 Start::Index(ix) => uris.get(*ix as usize).cloned(),
             };
+            // Soloist starts a list from its top, or a single track, on the
+            // device playing; a start part-way needs the Web API.
+            let context = remote_context(context_uri.clone());
+            let from_top = match &context {
+                Some(_) => offset.is_none() || uris.first() == offset.as_ref(),
+                None => uris.len() == 1,
+            };
+            let uri = context.or(offset.clone());
+            if from_top
+                && let Some(uri) = uri
+                && self.plays_on_soloist(cx)
+                && app::soloist(cx)
+                    .read(cx)
+                    .command("play", json!({ "uri": uri }))
+            {
+                return;
+            }
             // Spotify takes no starting track for an artist context; send
             // the tracks themselves.
             let context_uri = remote_context(context_uri);
@@ -1373,6 +1397,13 @@ impl Player {
 
     /// Move playback to another Connect device, or back to this one.
     pub fn transfer_to(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        if self.backend.is_none() && app::soloist(cx).read(cx).is_device(device_id) {
+            // Soloist takes the session over itself, where it was.
+            if !app::soloist(cx).read(cx).command("activate", Value::Null) {
+                app::toast_error("Soloist isn't ready yet; try again in a moment", cx);
+            }
+            return;
+        }
         if self.device_id() == Some(device_id) {
             match self.backend() {
                 Some(backend) => {
@@ -1384,6 +1415,7 @@ impl Player {
             }
             return;
         }
+        self.moving_to = Some((device_id.to_string(), Instant::now()));
         let api = app::api(cx);
         let id = device_id.to_string();
         remote(cx, async move { api.transfer(&id, true).await });
@@ -2036,7 +2068,7 @@ impl Player {
             return;
         };
         if !state.is_active {
-            // Another device took over; the cluster tells about that one.
+            self.mirror_through_soloist(state, cx);
             return;
         }
         self.active_device = Some(device);
@@ -2053,9 +2085,7 @@ impl Player {
         {
             return;
         }
-        self.playing = state.status == "playing";
-        self.loading = state.status == "buffering";
-        if self.playing
+        if state.status == "playing"
             && let Some((uri, position_ms)) = self.seek_when_playing.take()
         {
             let playing = state.track.as_ref().and_then(|t| t["uri"].as_str());
@@ -2063,6 +2093,135 @@ impl Player {
                 self.soloist_command("seek", json!({ "position_ms": position_ms }), cx);
             }
         }
+        self.show_soloist_state(state, true, cx);
+        // Lilac's own record of what played, so a restart can show it
+        // without asking Spotify.
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Soloist follows the account's session while another device plays
+    /// it, and reports that device's playback as its own, marked inactive.
+    /// It does not say which device that is; the Web API is asked once.
+    fn mirror_through_soloist(&mut self, state: crate::soloist::ws::State, cx: &mut Context<Self>) {
+        if !self.plays_on_soloist(cx) {
+            return;
+        }
+        if !self.mirrors_through_soloist(cx) {
+            // A paused session nobody plays (Soloist reports one when it
+            // starts) is the restore's to show, not another device's.
+            if !matches!(state.status.as_str(), "playing" | "buffering") {
+                return;
+            }
+            self.playing_elsewhere(cx);
+        }
+        self.show_soloist_state(state, false, cx);
+        cx.notify();
+    }
+
+    /// Soloist took the session over, or another device took it from
+    /// Soloist. Soloist sends no new state with that, so it is asked for one.
+    pub fn on_soloist_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active {
+            let Some(device) = app::soloist(cx).read(cx).device_id.clone() else {
+                return;
+            };
+            self.active_device = Some(device);
+            self.devices.retain(|d| d.id != OTHER_DEVICE);
+        } else if self.soloist_active(cx) && self.plays_on_soloist(cx) {
+            self.playing_elsewhere(cx);
+        } else {
+            return;
+        }
+        app::soloist(cx).read(cx).command("get_state", Value::Null);
+        self.refresh_queue(cx);
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
+    }
+
+    /// Another device plays: the one Lilac just moved playback to, or one
+    /// Spotify is yet to name.
+    fn playing_elsewhere(&mut self, cx: &mut Context<Self>) {
+        if let Some((id, at)) = self.moving_to.take()
+            && at.elapsed() < Duration::from_secs(15)
+            && self.devices.iter().any(|d| d.id == id)
+        {
+            self.devices.retain(|d| d.id != OTHER_DEVICE);
+            self.active_device = Some(id);
+            return;
+        }
+        self.active_device = Some(OTHER_DEVICE.to_string());
+        if !self.devices.iter().any(|d| d.id == OTHER_DEVICE) {
+            self.devices.push(Device {
+                id: OTHER_DEVICE.to_string(),
+                name: "another device".into(),
+                kind: DeviceKind::Other,
+            });
+        }
+        self.name_other_device(cx);
+    }
+
+    /// Another device plays and Soloist reports it (see `mirror_through_soloist`).
+    fn mirrors_through_soloist(&self, cx: &App) -> bool {
+        self.plays_on_soloist(cx) && self.remote_device().is_some() && !self.soloist_active(cx)
+    }
+
+    /// Learn which device plays in place of `OTHER_DEVICE`. Spotify may
+    /// still list Soloist as active for a moment, so it is asked again.
+    fn name_other_device(&mut self, cx: &mut Context<Self>) {
+        let api = app::api(cx);
+        cx.spawn(async move |this, cx| {
+            for delay in [0u64, 1500, 4000] {
+                cx.background_executor()
+                    .timer(Duration::from_millis(delay))
+                    .await;
+                let api = api.clone();
+                let state = runtime::run(async move { api.remote_state().await }).await;
+                let device = state.ok().flatten().and_then(|s| s.device);
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.active_device.as_deref() != Some(OTHER_DEVICE) {
+                            return true;
+                        }
+                        let Some(device) = device else { return false };
+                        let Some(id) = device.id.clone() else {
+                            return false;
+                        };
+                        if app::soloist(cx).read(cx).is_device(&id) {
+                            return false;
+                        }
+                        this.devices.retain(|d| d.id != OTHER_DEVICE);
+                        if !this.devices.iter().any(|d| d.id == id) {
+                            this.devices.push(Device {
+                                id: id.clone(),
+                                name: device.name.clone(),
+                                kind: device_kind(&device.kind),
+                            });
+                        }
+                        this.active_device = Some(id);
+                        cx.emit(PlayerEvent::StateChanged);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Show what Soloist reports, as this computer's playback (`here`) or
+    /// another device's.
+    fn show_soloist_state(
+        &mut self,
+        state: crate::soloist::ws::State,
+        here: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.playing = state.status == "playing";
+        self.loading = state.status == "buffering";
         self.connect_shuffle = state.shuffle;
         self.repeat = match state.repeat.as_str() {
             "track" => Repeat::Track,
@@ -2079,7 +2238,7 @@ impl Player {
                 // Shown at once; the Web API's copy follows, with names in
                 // the user's language (Soloist's are untranslated).
                 let (uri, duration) = (track.uri.to_string(), track.duration_ms);
-                if self.playing {
+                if here && self.playing {
                     crate::history::record(&track);
                 }
                 self.current = Some(track);
@@ -2089,10 +2248,6 @@ impl Player {
             }
             _ => cx.emit(PlayerEvent::StateChanged),
         }
-        // Lilac's own record of what played, so a restart can show it
-        // without asking Spotify.
-        self.save_session(cx);
-        cx.notify();
     }
 
     pub fn on_soloist_position(
@@ -2100,12 +2255,7 @@ impl Player {
         position: crate::soloist::ws::Position,
         cx: &mut Context<Self>,
     ) {
-        let soloist = app::soloist(cx).read(cx);
-        if !self
-            .active_device
-            .as_deref()
-            .is_some_and(|d| soloist.is_device(d))
-        {
+        if !self.soloist_active(cx) && !self.mirrors_through_soloist(cx) {
             return;
         }
         self.anchor(position.at(unix_ms()) as u32);
@@ -2115,15 +2265,48 @@ impl Player {
 
     /// Soloist's queue: what plays after the current track.
     pub fn on_soloist_queue(&mut self, upcoming: Vec<Value>, cx: &mut Context<Self>) {
-        if !self.soloist_active(cx) {
+        if !self.soloist_active(cx) && !self.mirrors_through_soloist(cx) {
             return;
         }
         let upcoming: Vec<Track> = upcoming
             .into_iter()
             .filter_map(|t| serde_json::from_value(t).ok())
             .collect();
-        self.queue = Queue::mirror(self.current.clone(), upcoming);
+        // Recommendations (autoplay) come as bare URIs: shown once named.
+        let unnamed: Vec<String> = upcoming
+            .iter()
+            .filter(|t| t.name.is_empty())
+            .map(|t| t.uri.to_string())
+            .collect();
+        let named = upcoming.iter().filter(|t| !t.name.is_empty()).cloned();
+        self.queue = Queue::mirror(self.current.clone(), named.collect());
         cx.notify();
+        if unnamed.is_empty() {
+            self.queue_refresh = None;
+            return;
+        }
+        self.queue_refresh = Some(cx.spawn(async move |this, cx| {
+            let found =
+                runtime::run(
+                    async move { crate::spotify::streaming::tracks_by_uri(&unnamed).await },
+                )
+                .await
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                let upcoming = upcoming
+                    .into_iter()
+                    .filter_map(|t| {
+                        if !t.name.is_empty() {
+                            return Some(t);
+                        }
+                        found.iter().find(|f| f.uri == t.uri).cloned()
+                    })
+                    .collect();
+                this.queue = Queue::mirror(this.current.clone(), upcoming);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Soloist is the device playing.
@@ -2133,14 +2316,18 @@ impl Player {
             .is_some_and(|d| app::soloist(cx).read(cx).is_device(d))
     }
 
-    /// Send a transport command straight to Soloist when it is the device
-    /// playing: no round trip through Spotify. False when it is not.
+    /// Send a transport command straight to Soloist: no round trip
+    /// through Spotify's Web API. Soloist passes it on to whichever device
+    /// plays, so on Soloist it drives other devices too; volume excepted,
+    /// which stays Soloist's own. False when Soloist cannot take it.
     fn soloist_command(&self, name: &str, fields: Value, cx: &App) -> bool {
         let Some(active) = self.active_device.as_deref() else {
             return false;
         };
         let soloist = app::soloist(cx).read(cx);
-        soloist.is_device(active) && soloist.command(name, fields)
+        let reaches =
+            soloist.is_device(active) || (name != "set_volume" && self.plays_on_soloist(cx));
+        reaches && soloist.command(name, fields)
     }
 
     /// Load `uri` again in the context it failed in (librespot has moved on
