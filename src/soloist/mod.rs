@@ -712,6 +712,11 @@ impl Soloist {
         }
     }
 
+    /// Started (or about to be) and not logged in yet.
+    pub fn coming_up(&self) -> bool {
+        !self.logged_in && !matches!(self.process, Process::Failed(_))
+    }
+
     pub fn is_device(&self, id: &str) -> bool {
         id == LOCAL_DEVICE || self.device_id.as_deref() == Some(id)
     }

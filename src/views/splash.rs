@@ -22,6 +22,9 @@ use crate::ui::window_frame::DragsWindow as _;
 const MIN_SHOWN: Duration = Duration::from_millis(1100);
 /// Never longer than this, whatever the network does.
 const MAX_SHOWN: Duration = Duration::from_millis(4000);
+/// Soloist takes longer to log in; until it has, this computer cannot be
+/// picked to play on. Still bounded: a stuck Soloist must not keep Lilac shut.
+const MAX_SHOWN_SOLOIST: Duration = Duration::from_millis(12000);
 const FADE: Duration = Duration::from_millis(280);
 /// The bloom: stem first, then florets from the bottom up.
 const BLOOM_START: f32 = 0.12;
@@ -70,16 +73,23 @@ impl EventEmitter<SplashEvent> for Splash {}
 impl Splash {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.observe(&app::player(cx), |this, player, cx| {
-            let player = player.read(cx);
-            this.set_target(stage_progress(player.warmup));
-            if can_leave(player) {
-                this.leave_after(MIN_SHOWN.saturating_sub(this.shown_at.elapsed()), cx);
-            }
+            this.set_target(stage_progress(player.read(cx).warmup));
+            this.leave_when_ready(cx);
             cx.notify();
         })
         .detach();
+        cx.observe(&app::soloist(cx), |this, _, cx| this.leave_when_ready(cx))
+            .detach();
         let deadline = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MAX_SHOWN).await;
+            let waits = this
+                .update(cx, |_, cx| app::player(cx).read(cx).waits_for_soloist(cx))
+                .unwrap_or(false);
+            if waits {
+                cx.background_executor()
+                    .timer(MAX_SHOWN_SOLOIST - MAX_SHOWN)
+                    .await;
+            }
             this.update(cx, |this, cx| this.leave_after(Duration::ZERO, cx))
                 .ok();
         });
@@ -92,12 +102,15 @@ impl Splash {
             target_at: now,
             _tasks: vec![deadline],
         };
-        let player = app::player(cx).read(cx);
-        this.set_target(stage_progress(player.warmup));
-        if can_leave(player) {
-            this.leave_after(MIN_SHOWN, cx);
-        }
+        this.set_target(stage_progress(app::player(cx).read(cx).warmup));
+        this.leave_when_ready(cx);
         this
+    }
+
+    fn leave_when_ready(&mut self, cx: &mut Context<Self>) {
+        if can_leave(cx) {
+            self.leave_after(MIN_SHOWN.saturating_sub(self.shown_at.elapsed()), cx);
+        }
     }
 
     fn set_target(&mut self, target: f32) {
@@ -143,6 +156,7 @@ impl Splash {
             }
         });
         let text = match player.warmup {
+            Warmup::Ready if player.waits_for_soloist(cx) => "Starting Soloist",
             Warmup::Ready if song.is_some() => "Ready when you are",
             Warmup::Ready => "Ready",
             _ if song.is_some() => "Picking up where you left off",
@@ -154,9 +168,11 @@ impl Splash {
     }
 }
 
-/// The app underneath is ready to use once it shows what to play.
-fn can_leave(player: &crate::player::Player) -> bool {
-    player.warmup == Warmup::Ready || player.current.is_some()
+/// The app underneath is ready to use once it shows what to play, and,
+/// on Soloist, once Soloist is there to play it.
+fn can_leave(cx: &App) -> bool {
+    let player = app::player(cx).read(cx);
+    (player.warmup == Warmup::Ready || player.current.is_some()) && !player.waits_for_soloist(cx)
 }
 
 fn stage_progress(warmup: Warmup) -> f32 {

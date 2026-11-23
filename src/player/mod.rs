@@ -415,6 +415,9 @@ impl Player {
         if self.reader.is_some() || self.reader_starting.is_some() {
             return;
         }
+        // Up before the loading screen goes, so this computer can be picked
+        // in the device list even while another device plays.
+        app::soloist(cx).update(cx, |s, cx| s.start(cx));
         let auth = app::session(cx).read(cx).streaming.clone();
         // On Soloist, Lilac's own record (`LastSession`, written from
         // Soloist's state) says where the user left off, and Soloist
@@ -724,6 +727,11 @@ impl Player {
         if let Some(state) = state.filter(|s| s.item.is_some()) {
             let device = state.device.as_ref().and_then(|d| d.id.clone());
             if state.is_playing && device != ours {
+                // Soloist comes up all the same: it is what "This computer"
+                // in the device list moves playback to.
+                if self.plays_on_soloist(cx) {
+                    app::soloist(cx).update(cx, |s, cx| s.start(cx));
+                }
                 // Show what the other device plays; the controls drive it.
                 // It must be in the list for that (which is not read at
                 // start-up on Soloist).
@@ -1894,6 +1902,12 @@ impl Player {
             backend.stop();
         }
         self.play_on_soloist(context, tracks, Some(uri), position, cx);
+    }
+
+    /// Soloist plays for this computer and is not logged in yet; the
+    /// loading screen waits for it.
+    pub fn waits_for_soloist(&self, cx: &App) -> bool {
+        self.plays_on_soloist(cx) && app::soloist(cx).read(cx).coming_up()
     }
 
     /// Whether this computer plays through Soloist rather than the
