@@ -39,6 +39,30 @@ fn cached<V: Render>(view: &Entity<V>, style: StyleRefinement) -> impl IntoEleme
     AnyView::from(view.clone()).cached(style)
 }
 
+/// The top bar, cached except on Windows: a reused cached view keeps its
+/// hitboxes but not its window-control areas, and Windows moves the window
+/// and presses its buttons only through those, so after any frame that reused
+/// the bar (a move is enough) it would stop moving the window or answering
+/// its buttons until it rendered again.
+fn top_bar(view: &Entity<TopBar>) -> AnyElement {
+    if cfg!(windows) {
+        return div()
+            .w_full()
+            .h(px(theme::TOP_BAR_HEIGHT))
+            .flex_none()
+            .child(view.clone())
+            .into_any_element();
+    }
+    cached(
+        view,
+        StyleRefinement::default()
+            .w_full()
+            .h(px(theme::TOP_BAR_HEIGHT))
+            .flex_none(),
+    )
+    .into_any_element()
+}
+
 /// Panel sizes for the current window width.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
@@ -348,13 +372,7 @@ impl Render for Lilac {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(cached(
-                        &self.top_bar,
-                        StyleRefinement::default()
-                            .w_full()
-                            .h(px(theme::TOP_BAR_HEIGHT))
-                            .flex_none(),
-                    ))
+                    .child(top_bar(&self.top_bar))
                     .child(
                         div()
                             .flex_1()
