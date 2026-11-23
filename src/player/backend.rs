@@ -59,6 +59,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,
+    /// Its volume can be set from here.
+    pub volume: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,6 +395,7 @@ fn simplify(update: &ClusterUpdate, time_delta_s: i64) -> Cluster {
                 d.device_id.clone()
             },
             name: d.name.clone(),
+            volume: !d.capabilities.disable_volume,
             kind: match d.device_type.value() {
                 1 | 14 => DeviceKind::Computer,
                 2 | 3 | 13 => DeviceKind::Phone,

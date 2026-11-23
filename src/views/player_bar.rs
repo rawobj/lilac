@@ -329,10 +329,10 @@ impl PlayerBar {
     }
 
     fn extras(&self, cx: &mut App) -> Div {
-        let (volume, muted) = {
+        let (volume, muted, fixed_elsewhere) = {
             let player = app::player(cx);
             let p = player.read(cx);
-            (p.volume, p.muted)
+            (p.volume, p.muted, p.volume_elsewhere().is_some())
         };
         let panel = app::ui(cx).read(cx).right_panel;
         let lyrics_open = *app::nav(cx).read(cx).current() == Route::Lyrics;
@@ -388,19 +388,27 @@ impl PlayerBar {
                 "Connect to a device",
                 RightPanel::Devices,
             ))
-            .child(
-                ui::icon_button("mute", volume_icon)
+            .child(match fixed_elsewhere {
+                // Asking would only bring Spotify's refusal; say so instead.
+                true => ui::icon_button("mute", volume_icon)
+                    .tip("Change the volume on the device playing")
+                    .opacity(0.4),
+                false => ui::icon_button("mute", volume_icon)
                     .tip(if muted { "Unmute" } else { "Mute" })
                     .on_click(|_, _, cx| app::player(cx).update(cx, |p, cx| p.toggle_mute(cx))),
-            )
-            .child(
-                div()
+            })
+            .child(match fixed_elsewhere {
+                true => div()
+                    .w(px(96.0))
+                    .opacity(0.4)
+                    .child(slider("volume", level, |_, _, _| {})),
+                false => div()
                     .w(px(96.0))
                     .child(slider("volume", level, |change, _, cx| {
                         let (SliderChange::Preview(value) | SliderChange::Commit(value)) = change;
                         app::player(cx).update(cx, |p, cx| p.set_volume(value, cx))
                     })),
-            )
+            })
             .child(
                 ui::icon_button("immersive", icons::MAXIMIZE)
                     .tip("Immersive mode")

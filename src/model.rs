@@ -638,6 +638,13 @@ pub struct RemoteDevice {
     pub is_active: bool,
     #[serde(default)]
     pub is_restricted: bool,
+    /// Phones often refuse volume changes from other apps.
+    #[serde(default = "yes")]
+    pub supports_volume: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

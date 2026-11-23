@@ -354,6 +354,12 @@ impl Player {
         self.devices.iter().find(|d| d.id == active)
     }
 
+    /// The device playing elsewhere when its volume cannot be set from
+    /// here (Spotify refuses it for many phones).
+    pub fn volume_elsewhere(&self) -> Option<&Device> {
+        self.remote_device().filter(|d| !d.volume)
+    }
+
     /// This device's Connect id, once the session is up.
     pub fn device_id(&self) -> Option<&str> {
         self.backend.as_ref().map(|b| b.device_id.as_str())
@@ -767,6 +773,7 @@ impl Player {
                         id,
                         name: remote.name.clone(),
                         kind: device_kind(&remote.kind),
+                        volume: remote.supports_volume,
                     });
                 }
                 self.active_device = device;
@@ -1986,6 +1993,7 @@ impl Player {
                                     id: device_id.clone(),
                                     name: crate::soloist::DEVICE_NAME.into(),
                                     kind: DeviceKind::Computer,
+                                    volume: true,
                                 });
                             }
                             p.active_device = Some(device_id.clone());
@@ -2156,6 +2164,7 @@ impl Player {
                 id: OTHER_DEVICE.to_string(),
                 name: "another device".into(),
                 kind: DeviceKind::Other,
+                volume: true,
             });
         }
         self.name_other_device(cx);
@@ -2196,6 +2205,7 @@ impl Player {
                                 id: id.clone(),
                                 name: device.name.clone(),
                                 kind: device_kind(&device.kind),
+                                volume: device.supports_volume,
                             });
                         }
                         this.active_device = Some(id);
@@ -2451,6 +2461,7 @@ impl Player {
                 id,
                 name: "Lilac".into(),
                 kind: DeviceKind::Computer,
+                volume: true,
             });
         }
     }
@@ -2478,6 +2489,7 @@ impl Player {
                             id: d.id.clone()?,
                             name: d.name.clone(),
                             kind: device_kind(&d.kind),
+                            volume: d.supports_volume,
                         })
                     })
                     .collect();
