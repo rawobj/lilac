@@ -156,6 +156,10 @@ pub struct Player {
     play_when_ready: bool,
     /// Where to go once Soloist plays this track (it starts at 0).
     seek_when_playing: Option<(String, u32)>,
+    /// The track of the paused session Spotify still holds, as Soloist
+    /// reports it when it starts. Play on that track takes the session
+    /// over: its list, queue and shuffle as they were.
+    soloist_held: Option<String>,
     restore_lookup: Option<tokio::task::JoinHandle<RestoreLookup>>,
     queue_refresh: Option<Task<()>>,
     /// Track URIs of the list we started when it has no context URI, in
@@ -283,6 +287,7 @@ impl Player {
             restore: None,
             play_when_ready: false,
             seek_when_playing: None,
+            soloist_held: None,
             restore_lookup: None,
             queue_refresh: None,
             started_tracks: Vec::new(),
@@ -1040,6 +1045,10 @@ impl Player {
             && self.plays_on_soloist(cx)
             && let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string())
         {
+            let position = self.position_ms();
+            if self.take_over_held(&uri, position, cx) {
+                return;
+            }
             // Nothing plays yet: start where we were, on Soloist.
             let context = remote_context(self.connect_context.clone());
             // A list Lilac did not start (Spotify's last state) is known only
@@ -1051,7 +1060,6 @@ impl Player {
             } else {
                 vec![uri.clone()]
             };
-            let position = self.position_ms();
             self.play_on_soloist(context, tracks, Some(uri), position, cx);
             return;
         }
@@ -1965,6 +1973,30 @@ impl Player {
     }
 
     /// Play on Soloist, starting it first if it is not up.
+    /// Play `uri` by taking over the paused session Spotify holds for it:
+    /// Soloist takes it over paused and silent, so the seek is not heard,
+    /// and Spotify's copy of the position is where it was last paused,
+    /// not ours. False when Spotify holds no session for this track.
+    fn take_over_held(&mut self, uri: &str, position_ms: u32, cx: &mut Context<Self>) -> bool {
+        if self.soloist_held.as_deref() != Some(uri) {
+            return false;
+        }
+        let soloist = app::soloist(cx).read(cx);
+        let sent = soloist.command("activate", Value::Null)
+            && soloist.command("seek", json!({ "position_ms": position_ms }))
+            && soloist.command("play", Value::Null);
+        if !sent {
+            return false;
+        }
+        self.soloist_held = None;
+        self.soloist_started_at = Some(Instant::now());
+        self.halted = false;
+        self.loading = true;
+        cx.emit(PlayerEvent::StateChanged);
+        cx.notify();
+        true
+    }
+
     fn play_on_soloist(
         &mut self,
         context: Option<String>,
@@ -2085,6 +2117,7 @@ impl Player {
         self.active_device = Some(device);
         self.halted = false;
         self.play_when_ready = false;
+        self.soloist_held = None;
         // Something (a session handover at start-up) can pause Soloist a
         // moment after Lilac started it; nobody asked for that pause.
         if state.status == "paused"
@@ -2122,6 +2155,11 @@ impl Player {
             // A paused session nobody plays (Soloist reports one when it
             // starts) is the restore's to show, not another device's.
             if !matches!(state.status.as_str(), "playing" | "buffering") {
+                self.soloist_held = state
+                    .track
+                    .as_ref()
+                    .and_then(|t| t["uri"].as_str())
+                    .map(str::to_string);
                 return;
             }
             self.playing_elsewhere(cx);
