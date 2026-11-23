@@ -88,6 +88,8 @@ pub struct Settings {
     pub engine: Engine,
     /// Replace the Soloist build before it expires.
     pub soloist_auto_update: bool,
+    /// Draw the window on the GPU. Off draws it on the CPU (Linux only).
+    pub hardware_acceleration: bool,
 }
 
 impl Default for Settings {
@@ -109,6 +111,7 @@ impl Default for Settings {
             whats_new_seen: String::new(),
             engine: Engine::Automatic,
             soloist_auto_update: true,
+            hardware_acceleration: true,
         }
     }
 }

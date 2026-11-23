@@ -53,7 +53,11 @@ fn main() {
     #[cfg(target_os = "linux")]
     name_audio_stream();
     #[cfg(target_os = "linux")]
-    keep_discrete_gpu_asleep();
+    if settings::Settings::load().hardware_acceleration {
+        keep_discrete_gpu_asleep();
+    } else {
+        render_in_software();
+    }
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(|cx| {
@@ -126,6 +130,27 @@ fn name_audio_stream() {
         );
         // SAFETY: first thing in main, before any other thread exists.
         unsafe { std::env::set_var("PIPEWIRE_ALSA", props) };
+    }
+}
+
+/// Hardware acceleration is off: draw on the CPU. gpui picks the renderer's
+/// adapter itself, preferring GPUs but taking a CPU one when nothing else
+/// works, so the GPU drivers are hidden from it: Vulkan keeps only lavapipe
+/// (the CPU driver, if installed), and OpenGL goes through Mesa's EGL with
+/// llvmpipe, not NVIDIA's EGL, which glvnd would otherwise try first.
+#[cfg(target_os = "linux")]
+fn render_in_software() {
+    let mesa_egl = ["/usr/share/glvnd/egl_vendor.d", "/etc/glvnd/egl_vendor.d"]
+        .iter()
+        .map(|dir| std::path::Path::new(dir).join("50_mesa.json"))
+        .find(|path| path.exists());
+    // SAFETY: called from main before the window, wgpu or the runtime start.
+    unsafe {
+        std::env::set_var("VK_LOADER_DRIVERS_SELECT", "*lvp*");
+        std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+        if let Some(path) = mesa_egl {
+            std::env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", path);
+        }
     }
 }
 

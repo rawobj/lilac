@@ -199,6 +199,15 @@ impl Render for SettingsPage {
                     s.reduce_transparency = v
                 }),
             ))
+            .when(cfg!(target_os = "linux"), |section| {
+                section.child(row(
+                    "Hardware acceleration",
+                    "Draw the window on the graphics card. Turn it off if Lilac shows a blank or glitching window; drawing on the processor uses more CPU. Takes effect after a restart.",
+                    switch("hardware-acceleration", settings.hardware_acceleration, |s, v| {
+                        s.hardware_acceleration = v
+                    }),
+                ))
+            })
             .child(row("Lyrics", lyrics_detail, lyrics_styles))
             .child(row(
                 "Show Now Playing panel on start",
