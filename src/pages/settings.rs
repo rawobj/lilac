@@ -6,7 +6,7 @@ use gpui_kit::*;
 use super::scroll_page;
 use crate::app;
 use crate::images::ImageCache;
-use crate::settings::{Engine, LyricsStyle, Quality, Settings};
+use crate::settings::{LyricsStyle, Settings};
 use crate::soloist::{self, Install, Process, build};
 use crate::theme;
 use crate::ui::{self, Placeholder};
@@ -149,32 +149,15 @@ impl Render for SettingsPage {
                 )
         }));
 
-        let mut quality = div().flex().gap_2();
-        for option in Quality::ALL {
-            quality = quality.child(
-                ui::chip(option.label(), option.label(), settings.quality == option)
-                    .on_click(move |_, _, cx| app::update_settings(cx, |s| s.quality = option)),
-            );
-        }
-
-        let audio = section("Audio")
-            .child(row(
-                "Streaming quality",
-                "Applies from the next track.",
-                quality,
+        let engine = if app::session(cx).read(cx).is_free() {
+            section("Playback").child(row(
+                "Previews",
+                "Spotify Free plays each song's 30-second preview here. Full songs need Spotify Premium, played through Soloist.",
+                div(),
             ))
-            .child(row(
-                "Normalize volume",
-                "Play every track at a similar loudness.",
-                switch("normalize", settings.normalize, |s, v| s.normalize = v),
-            ))
-            .child(row(
-                "Gapless playback",
-                "Load the next track early so albums play without pauses.",
-                switch("gapless", settings.gapless, |s, v| s.gapless = v),
-            ));
-
-        let engine = playback_engine(&settings, &self.api_key, cx);
+        } else {
+            playback_engine(&settings, &self.api_key, cx)
+        };
 
         let mut lyrics_styles = div().flex().gap_2();
         for option in LyricsStyle::ALL {
@@ -312,7 +295,6 @@ impl Render for SettingsPage {
                         .child("Settings"),
                 )
                 .child(account)
-                .child(audio)
                 .child(engine)
                 .child(display)
                 .child(integration)
@@ -323,34 +305,10 @@ impl Render for SettingsPage {
     }
 }
 
-/// The engine choice and everything about Soloist.
+/// Everything about Soloist, which plays for Lilac.
 fn playback_engine(settings: &Settings, api_key: &Entity<InputState>, cx: &App) -> Div {
     let soloist = app::soloist(cx).read(cx);
     let now = soloist::now();
-
-    let mut engines = div().flex().gap_2();
-    for option in Engine::ALL {
-        engines = engines.child(
-            ui::chip(option.label(), option.label(), settings.engine == option).on_click(
-                move |_, _, cx| {
-                    app::update_settings(cx, |s| s.engine = option);
-                    // Start (or stop) the built-in player to match.
-                    app::player(cx).update(cx, |p, cx| p.apply_engine(cx));
-                },
-            ),
-        );
-    }
-    let engine_detail = match settings.engine {
-        Engine::Automatic if soloist.builtin_refused() && soloist.usable() => {
-            "Spotify refused the built-in player lately, so Soloist plays for now."
-        }
-        Engine::Automatic => "The built-in player, switching to Soloist when Spotify refuses it.",
-        Engine::Builtin => "Always the built-in player (librespot).",
-        Engine::Soloist if !soloist.usable() => {
-            "Soloist, once it is installed, has a key and is paired. Until then, the built-in player."
-        }
-        Engine::Soloist => "Always Soloist.",
-    };
 
     // What is installed, and what happens next.
     let busy = matches!(
@@ -379,7 +337,7 @@ fn playback_engine(settings: &Settings, api_key: &Entity<InputState>, cx: &App) 
             b.days_left(now)
         )
         .into(),
-        (_, None) => "Not installed. Spotify's own headless player; Lilac downloads it from Spotify's servers (soloist-builds.spotifycdn.com) when you ask, under Spotify's terms.".into(),
+        (_, None) => "Not installed. Spotify's own headless player, which plays for Lilac; Lilac downloads it from Spotify's servers (soloist-builds.spotifycdn.com) when you ask, under Spotify's terms.".into(),
     };
     let failed = match &soloist.install {
         Install::Failed(why) => Some(format!("Download failed: {why}")),
@@ -506,8 +464,7 @@ fn playback_engine(settings: &Settings, api_key: &Entity<InputState>, cx: &App) 
             )
         });
 
-    section("Playback engine")
-        .child(row("Engine", engine_detail, engines))
+    section("Playback")
         .child(row(
             "Soloist",
             failed.map(SharedString::from).unwrap_or(status),

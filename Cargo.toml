@@ -24,10 +24,8 @@ getrandom = "0.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 smallvec = "1"
 librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
-librespot-playback = { version = "0.8.0", default-features = false, features = ["rodio-backend", "rustls-tls-webpki-roots"] }
-rodio = { version = "0.21.1", default-features = false, features = ["playback"] }
+rodio = { version = "0.21.1", default-features = false, features = ["playback", "mp3"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-librespot-connect = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-protocol = "0.8.0"
 protobuf = "3.7.2"
 log = "0.4"

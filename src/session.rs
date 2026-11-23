@@ -72,6 +72,18 @@ impl Session {
         self.api.is_demo()
     }
 
+    /// A Spotify Free account: no full songs anywhere but Spotify's own
+    /// apps (Soloist needs Premium too), so Lilac plays the 30-second
+    /// previews. An account not known yet counts as Premium.
+    pub fn is_free(&self) -> bool {
+        !self.is_demo()
+            && self
+                .user
+                .as_ref()
+                .and_then(|u| u.product.as_deref())
+                .is_some_and(|p| p == "free" || p == "open")
+    }
+
     /// Browse a bundled sample library without an account. Nothing is played.
     pub fn enter_demo(&mut self, cx: &mut Context<Self>) {
         self.login = None;

@@ -553,17 +553,6 @@ pub struct SavedItem {
     pub item: Option<Track>,
 }
 
-/// One entry of the recently played list.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct PlayedItem {
-    #[serde(default, alias = "track", alias = "episode")]
-    pub item: Option<Track>,
-    #[serde(default)]
-    pub played_at: String,
-    #[serde(default)]
-    pub context: Option<PlayedContext>,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PlayedContext {
     #[serde(default)]

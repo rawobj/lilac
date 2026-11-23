@@ -186,7 +186,7 @@ impl PlayerBar {
 
     fn transport(&mut self, cx: &mut Context<Self>) -> Div {
         let player = app::player(cx);
-        let (playing, loading, shuffle, repeat, position, duration, has_track) = {
+        let (playing, loading, shuffle, repeat, position, duration, has_track, previewing) = {
             let p = player.read(cx);
             (
                 p.playing,
@@ -196,8 +196,11 @@ impl PlayerBar {
                 p.position_ms(),
                 p.duration_ms(),
                 p.current.is_some(),
+                p.previewing(),
             )
         };
+        // Preview mode plays one track: nothing to skip to or repeat.
+        let single = player.read(cx).previews(cx);
 
         let shown = match self.scrub {
             Some(fraction) => (fraction * duration as f32) as u32,
@@ -215,6 +218,7 @@ impl PlayerBar {
             .gap_2()
             .child(
                 ui::toggle_icon_button("shuffle", icons::SHUFFLE, shuffle)
+                    .when(single, |b| b.opacity(0.35))
                     .tip(if shuffle {
                         "Disable shuffle"
                     } else {
@@ -224,6 +228,7 @@ impl PlayerBar {
             )
             .child(
                 ui::icon_button("previous", icons::SKIP_BACK)
+                    .when(single, |b| b.opacity(0.35))
                     .tip("Previous")
                     .on_click(|_, _, cx| app::player(cx).update(cx, |p, cx| p.previous(cx))),
             )
@@ -254,6 +259,7 @@ impl PlayerBar {
             )
             .child(
                 ui::icon_button("next", icons::SKIP_FORWARD)
+                    .when(single, |b| b.opacity(0.35))
                     .tip("Next")
                     .on_click(|_, _, cx| app::player(cx).update(cx, |p, cx| p.next(cx))),
             )
@@ -267,6 +273,7 @@ impl PlayerBar {
                     },
                     repeat != Repeat::Off,
                 )
+                .when(single, |b| b.opacity(0.35))
                 .tip(match repeat {
                     Repeat::Off => "Enable repeat",
                     Repeat::Context => "Enable repeat one",
@@ -314,7 +321,17 @@ impl PlayerBar {
                     }),
                 )),
             )
-            .child(time(duration));
+            .child(time(duration))
+            .when(previewing, |row| {
+                // A free account hears 30 seconds of each song.
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme::accent())
+                        .child("Preview"),
+                )
+            });
 
         div()
             .flex_none()

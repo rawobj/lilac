@@ -22,7 +22,6 @@ pub fn render(
 ) -> (&'static str, AnyElement, Option<AnyElement>) {
     let entity = app::soloist(cx);
     let step = entity.read(cx).step();
-    let refused = entity.read(cx).builtin_refused();
     let (content, confirm) = match step {
         Step::Download => download(entity.read(cx)),
         Step::Key => key_step(key),
@@ -33,11 +32,10 @@ pub fn render(
         .flex()
         .flex_col()
         .gap_4()
-        .when(step != Step::Done && refused, |d| {
+        .when(step != Step::Done, |d| {
             d.child(muted(
-                "Spotify won't stream to Lilac's built-in player on your account. \
-                 Soloist is Spotify's own player for apps like Lilac. Setting it up \
-                 takes a couple of minutes, once.",
+                "Lilac plays music through Soloist, Spotify's own player for apps \
+                 like Lilac. Setting it up takes a couple of minutes, once.",
             ))
         })
         .when(step != Step::Done, |d| d.child(progress(step)))
@@ -328,10 +326,7 @@ fn pair(soloist: &Soloist) -> (AnyElement, Option<AnyElement>) {
             "Open Spotify on it and tap the devices button (the speaker icon \
                  next to the song that's playing, or in Settings → Devices)."
                 .into(),
-            format!(
-                "Pick “{}”. Not plain “Lilac”: that is the built-in player.",
-                soloist::DEVICE_NAME
-            ),
+            format!("Pick “{}”.", soloist::DEVICE_NAME),
         ])),
     );
 
@@ -362,9 +357,8 @@ fn done(cx: &mut App) -> (AnyElement, Option<AnyElement>) {
         .flex_col()
         .gap_3()
         .child(muted(
-            "Soloist is connected to your account. Lilac plays through it whenever \
-             Spotify won't stream to the built-in player, and downloads new Soloist \
-             builds before old ones run out.",
+            "Soloist is connected to your account. Lilac plays through it, and \
+             downloads new Soloist builds before old ones run out.",
         ))
         .child(muted(
             "You can switch your phone back to whatever it was playing; it isn't needed any more.",
@@ -421,23 +415,9 @@ pub fn locked_banner() -> Div {
                         .child("One more step before Lilac can play music"),
                 )
                 .child(muted(
-                    "Spotify doesn't let Lilac's built-in player stream on some accounts, \
-                     yours included. Soloist, Spotify's own player, fixes this in about \
-                     two minutes.",
+                    "Lilac plays through Soloist, Spotify's own player. Setting it up \
+                     takes about two minutes, once.",
                 )),
-        )
-        .child(
-            div()
-                .id("locked-retry")
-                .flex_none()
-                .text_sm()
-                .text_color(theme::text_muted())
-                .cursor_pointer()
-                .hover(|d| d.text_color(theme::text()))
-                .child("Try again")
-                .on_click(|_, _, cx| {
-                    app::player(cx).update(cx, |p, cx| p.retry_builtin(cx));
-                }),
         )
         .child(
             ui::pill_button("locked-setup", "Set up Soloist", true)

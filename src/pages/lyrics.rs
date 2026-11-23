@@ -115,6 +115,10 @@ impl LyricsPage {
         self.state = State::Loading;
         self.scroll.set_offset(point(px(0.0), px(0.0)));
         cx.notify();
+        if app::session(cx).read(cx).is_free() {
+            // Preview mode has no lyrics (see `render`).
+            return;
+        }
 
         let auth = app::api(cx).auth.clone();
         let third_party = app::settings(cx).read(cx).lrclib_lyrics;
@@ -556,6 +560,13 @@ impl Render for LyricsPage {
         };
 
         let lyrics = match &self.state {
+            _ if app::session(cx).read(cx).is_free() => notice(
+                Some(icons::MIC),
+                "Preview mode",
+                "Lyrics can't be loaded on Spotify Free, where Lilac plays 30-second previews.",
+                glow,
+            )
+            .into_any_element(),
             State::Idle => notice(
                 Some(icons::MIC),
                 "Nothing playing",

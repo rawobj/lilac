@@ -89,37 +89,9 @@ impl LastSession {
     }
 }
 
-/// Unix seconds of an RFC 3339 UTC timestamp as Spotify writes them
-/// (`2026-11-14T12:34:56.789Z`).
-pub fn parse_utc(stamp: &str) -> Option<u64> {
-    let (date, time) = stamp.split_once('T')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let time = time.trim_end_matches('Z');
-    let time = time.split(['+', '.']).next()?;
-    let mut t = time.split(':').map(|p| p.parse::<i64>());
-    let (h, min, sec) = (t.next()?.ok()?, t.next()?.ok()?, t.next()?.ok()?);
-    // Days since the epoch for a proleptic Gregorian date (Howard Hinnant).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    u64::try_from(days * 86_400 + h * 3600 + min * 60 + sec).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_spotify_timestamps() {
-        assert_eq!(parse_utc("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_utc("2026-11-14T12:34:56.789Z"), Some(1_794_659_696));
-        assert_eq!(parse_utc("2000-03-01T00:00:00Z"), Some(951_868_800));
-        assert_eq!(parse_utc("nonsense"), None);
-    }
 
     #[test]
     fn saved_track_details_read_back() {

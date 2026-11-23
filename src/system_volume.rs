@@ -11,7 +11,6 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -44,12 +43,6 @@ struct SystemVolume {
 static SYSTEM: OnceLock<SystemVolume> = OnceLock::new();
 /// How long after our own change stale reports may still arrive.
 const SETTLE: Duration = Duration::from_millis(800);
-static READY: AtomicBool = AtomicBool::new(false);
-
-/// Connected to a sound server that owns the volume.
-pub fn available() -> bool {
-    READY.load(Ordering::Acquire)
-}
 
 /// Set Lilac's stream volume; applied as soon as the stream exists.
 pub fn set(volume: f32) {
@@ -65,18 +58,14 @@ pub fn start(on_external: impl Fn(f32) + Send + 'static) {
     if SYSTEM.set(SystemVolume { tx: tx.clone() }).is_err() {
         return;
     }
-    let spawned = std::thread::Builder::new()
+    let _ = std::thread::Builder::new()
         .name("lilac-volume".into())
         .spawn(move || {
             let Some(server) = Server::connect(tx) else {
                 return;
             };
-            READY.store(true, Ordering::Release);
             server.run(rx, on_external);
         });
-    if spawned.is_err() {
-        READY.store(false, Ordering::Release);
-    }
 }
 
 struct Server {

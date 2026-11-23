@@ -1,9 +1,7 @@
-//! Spotify Soloist, Spotify's own headless player, as a second way to play.
+//! Spotify Soloist, Spotify's own headless player, which plays for Lilac.
 //!
-//! Spotify stops handing out decryption keys to librespot for some accounts
-//! (librespot issue #1649); its official clients keep playing. Soloist is
-//! one of them: Lilac downloads it from Spotify when the user asks, runs it
-//! as a child process and controls it as a Spotify Connect device. Builds
+//! Lilac downloads it from Spotify when the user asks, runs it as a child
+//! process and controls it as a Spotify Connect device. Builds
 //! expire 90 days after they are made, so Lilac keeps track of the
 //! installed build, replaces it in time and says so when it cannot.
 
@@ -36,10 +34,6 @@ pub const LOCAL_DEVICE: &str = "soloist-local";
 /// How Soloist appears in Spotify's device lists.
 pub const DEVICE_NAME: &str = "Lilac (Soloist)";
 
-/// After Spotify refused the built-in player, Automatic plays through
-/// Soloist for this long before trying the built-in player again.
-const REFUSAL_MEMORY: u64 = 3 * build::DAY;
-
 /// How long a play request waits for Soloist to start and log in.
 const READY_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -57,8 +51,6 @@ pub struct Store {
     pub newer: Option<String>,
     /// The loudest expiry reminder shown for the installed build.
     pub reminded: Option<(u64, Reminder)>,
-    /// When Spotify last refused the built-in player's key requests.
-    pub builtin_refused_at: Option<u64>,
 }
 
 impl Store {
@@ -207,13 +199,6 @@ impl Soloist {
         self.installed().is_some() && !self.expired() && self.has_key() && self.store.paired
     }
 
-    /// Spotify refused the built-in player recently.
-    pub fn builtin_refused(&self) -> bool {
-        self.store
-            .builtin_refused_at
-            .is_some_and(|at| now().saturating_sub(at) < REFUSAL_MEMORY)
-    }
-
     pub fn step(&self) -> Step {
         if self.installed().is_none() || self.expired() {
             Step::Download
@@ -244,8 +229,6 @@ impl Soloist {
         if !Self::setup_open(cx) || self.step() != Step::Pair {
             return;
         }
-        // One Lilac in the phone's list while pairing: the right one.
-        cx.defer(|cx| app::player(cx).update(cx, |p, cx| p.hide_builtin(true, cx)));
         self.start(cx);
         if self.gate == Gate::Unchecked {
             self.gate = match firewall::detect() {
@@ -259,7 +242,6 @@ impl Soloist {
     /// The setup was closed: whatever it opened in the firewall closes too.
     pub fn setup_closed(&mut self, cx: &mut Context<Self>) {
         self.close_firewall();
-        cx.defer(|cx| app::player(cx).update(cx, |p, cx| p.hide_builtin(false, cx)));
         if !self.store.paired && self.waiters.is_empty() {
             self.stop(cx);
         }
@@ -318,18 +300,6 @@ impl Soloist {
     /// Soloist's pairing port, while it runs.
     pub fn pairing_port(&self) -> Option<u16> {
         firewall::pairing_port(self.pid?)
-    }
-
-    pub fn record_builtin_refused(&mut self, cx: &mut Context<Self>) {
-        self.store.builtin_refused_at = Some(now());
-        self.store.save();
-        cx.notify();
-    }
-
-    pub fn forget_builtin_refused(&mut self, cx: &mut Context<Self>) {
-        self.store.builtin_refused_at = None;
-        self.store.save();
-        cx.notify();
     }
 
     pub fn set_api_key(&mut self, key: String, cx: &mut Context<Self>) {
@@ -566,13 +536,7 @@ impl Soloist {
                     self.store.save();
                     self.close_firewall();
                     cx.defer(|cx| {
-                        // Refused before: Soloist becomes the engine and the
-                        // built-in player does not come back.
-                        crate::player::Player::prefer_soloist(cx);
-                        app::player(cx).update(cx, |p, cx| {
-                            p.hide_builtin(false, cx);
-                            p.apply_engine(cx);
-                        })
+                        app::player(cx).update(cx, |p, cx| p.soloist_paired(cx));
                     });
                     if !Self::setup_open(cx) {
                         app::toast("Soloist is paired with your account", cx);

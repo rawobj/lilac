@@ -1149,6 +1149,23 @@ pub async fn preview_probe(uri: &str) -> Result<(usize, usize)> {
     Ok((files, bytes.len()))
 }
 
+/// A track's 30-second preview clip (MP3), what a free account plays.
+/// None when the track has none. Kept in memory only.
+pub async fn preview_clip(uri: &str) -> Result<Option<Vec<u8>>> {
+    let uri = SpotifyUri::from_uri(uri)?;
+    let track: RawTrack = get_many(ExtensionKind::TRACK_V4, &[uri])
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("track not found"))?;
+    let Some(file) = track.previews.values().next() else {
+        return Ok(None);
+    };
+    let session = session().await?;
+    Ok(Some(
+        session.spclient().get_audio_preview(file).await?.to_vec(),
+    ))
+}
+
 /// For the test report: the background connection is up (waits for it).
 pub async fn connected() -> Result<()> {
     session().await.map(|_| ())
@@ -1657,7 +1674,7 @@ fn base62(uri: &SpotifyUri) -> String {
     uri.to_id().unwrap_or_default()
 }
 
-/// What librespot would refuse to play: no audio and no stand-in, or not
+/// What cannot be played: no audio and no stand-in, or not
 /// released yet (playlists list announced albums' tracks before that).
 fn playable(track: &RawTrack) -> bool {
     let now = librespot_core::date::Date::now_utc().as_timestamp_ms();

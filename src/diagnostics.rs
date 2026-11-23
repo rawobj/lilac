@@ -534,7 +534,7 @@ mod tests {
         let mp3 = "symphonia_bundle_mp3::demuxer";
         assert!(!worth_logging(mp3, Warn, false));
         assert!(worth_logging(mp3, Error, false));
-        assert!(worth_logging("librespot_playback::player", Warn, false));
+        assert!(worth_logging("librespot_core::session", Warn, false));
         // gpui's own errors count until the window is gone.
         assert!(worth_logging("", Error, false));
         assert!(!worth_logging("", Error, true));

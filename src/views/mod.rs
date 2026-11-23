@@ -348,6 +348,7 @@ impl Render for Lilac {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::model::set_display_scale(window.scale_factor());
         let status = app::session(cx).read(cx).status.clone();
+        let free = app::session(cx).read(cx).is_free();
         let route = app::nav(cx).read(cx).current().clone();
         let (immersive, sidebar_collapsed, panel) = {
             let ui = app::ui(cx);
@@ -416,6 +417,7 @@ impl Render for Lilac {
                     .when(self.locked, |column| {
                         column.child(soloist_setup::locked_banner())
                     })
+                    .when(free, |column| column.child(free_banner()))
                     .child(cached(
                         &self.player_bar,
                         StyleRefinement::default()
@@ -485,4 +487,46 @@ mod tests {
         assert!(!hidden.panel);
         assert_eq!(hidden.sidebar, theme::SIDEBAR_COLLAPSED);
     }
+}
+
+/// Shown above the player bar for a Spotify Free account, so the 30-second
+/// songs do not look like a fault.
+fn free_banner() -> Div {
+    div()
+        .flex_none()
+        .mx(px(theme::GAP))
+        .mt(px(theme::GAP))
+        .px_4()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_4()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .bg(theme::glass_fill_strong())
+        .border_1()
+        .border_color(theme::accent())
+        .child(
+            svg()
+                .path(crate::ui::icons::INFO)
+                .flex_none()
+                .size(px(22.0))
+                .text_color(theme::accent()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Spotify Free: browse only, songs play as previews"),
+                )
+                .child(div().text_color(theme::text_muted()).child(
+                    "Your account is on Spotify Free, so Lilac plays each song's 30-second \
+                     preview. Full playback isn't supported here; it needs Spotify Premium.",
+                )),
+        )
 }

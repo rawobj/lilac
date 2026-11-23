@@ -39,7 +39,6 @@ fn shown_state(player: &Player) -> u64 {
         (&device.id, &device.name).hash(&mut h);
     }
     player.active_device.hash(&mut h);
-    player.device_id().hash(&mut h);
     std::mem::discriminant(&player.repeat).hash(&mut h);
     player.remote_device().is_some().hash(&mut h);
     player.queue_editable().hash(&mut h);
@@ -80,6 +79,21 @@ impl RightPanelView {
             shown: 0,
             panel: RightPanel::Hidden,
         }
+    }
+
+    /// A panel that has nothing to offer in preview mode, saying why.
+    fn preview_mode(title: &'static str, icon: &'static str, detail: &'static str) -> Div {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(Self::header(title))
+            .child(
+                div()
+                    .flex_1()
+                    .px_6()
+                    .child(ui::empty_state(icon, "Preview mode", detail)),
+            )
     }
 
     fn header(title: impl Into<SharedString>) -> Div {
@@ -269,6 +283,13 @@ impl RightPanelView {
 
     fn queue(&self, window: &Window, cx: &mut App) -> Div {
         let player = app::player(cx);
+        if player.read(cx).previews(cx) {
+            return Self::preview_mode(
+                "Queue",
+                icons::LIST_MUSIC,
+                "Spotify Free plays one 30-second preview at a time, so there is no queue.",
+            );
+        }
         let (current, user, upcoming, context_name) = {
             let p = player.read(cx);
             (
@@ -400,20 +421,24 @@ impl RightPanelView {
     }
 
     fn devices(&self, _: &Window, cx: &mut App) -> Div {
+        if app::player(cx).read(cx).previews(cx) {
+            return Self::preview_mode(
+                "Connect to a device",
+                icons::DEVICES,
+                "Spotify Free plays previews on this computer only; other devices can't be played on or controlled from here.",
+            );
+        }
         let (devices, active, ours) = {
             let player = app::player(cx);
             let player = player.read(cx);
-            // This computer is the built-in player's device, or Soloist's
-            // when Soloist does the playing.
+            // This computer is Soloist's device.
             let soloist = app::soloist(cx).read(cx);
-            let ours = player.device_id().map(str::to_string).or_else(|| {
-                player
-                    .devices
-                    .iter()
-                    .find(|d| soloist.is_device(&d.id))
-                    .map(|d| d.id.clone())
-                    .or_else(|| soloist.device_id.clone())
-            });
+            let ours = player
+                .devices
+                .iter()
+                .find(|d| soloist.is_device(&d.id))
+                .map(|d| d.id.clone())
+                .or_else(|| soloist.device_id.clone());
             // Soloist goes by two ids (a local one until Spotify lists it).
             let active = match player.active_device.clone() {
                 Some(a) if soloist.is_device(&a) => ours.clone(),

@@ -37,7 +37,7 @@ pub fn run(cx: &mut App) {
             .unwrap_or_default();
         let mut body = String::new();
         let _ = writeln!(body, "Account type: {}", local.account);
-        let _ = writeln!(body, "Playback engine: {}", local.engine);
+        let _ = writeln!(body, "Playback: {}", local.engine);
         let _ = writeln!(body, "Soloist: {}", local.soloist);
         let _ = writeln!(body, "Library: {}", local.library);
         let _ = writeln!(body, "\nChecks:");
@@ -76,13 +76,16 @@ fn gather(cx: &App) -> Local {
         Some(product) => product.to_string(),
         None => "unknown".into(),
     };
-    let settings = app::settings(cx).read(cx);
-    let engine = format!("{:?}", settings.engine);
+    let engine = if session.is_free() {
+        "previews (Spotify Free)".to_string()
+    } else {
+        "Soloist".to_string()
+    };
     let soloist = app::soloist(cx).read(cx);
     let soloist = match soloist.installed() {
         None => "not installed".into(),
         Some(build) => format!(
-            "{} installed{}{}{}",
+            "{} installed{}{}",
             build.version,
             if soloist.has_key() {
                 ", key set"
@@ -90,11 +93,6 @@ fn gather(cx: &App) -> Local {
                 ", no key"
             },
             if soloist.logged_in { ", logged in" } else { "" },
-            if soloist.builtin_refused() {
-                "; built-in player refused by Spotify"
-            } else {
-                ""
-            },
         ),
     };
     let library = app::library(cx).read(cx);

@@ -93,13 +93,6 @@ pub fn play_button(id: impl Into<ElementId>, size: f32, playing: bool) -> Statef
         }])
         .hover(|s| s.opacity(0.92))
         .active(|s| s.opacity(0.8))
-        .when(!playing, |button| {
-            // Get the device ready while the button is still held down.
-            button.on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                let player = crate::app::player(cx);
-                player.update(cx, |p, _| p.prepare_to_play());
-            })
-        })
         .child(
             svg()
                 .path(glyph)

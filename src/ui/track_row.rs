@@ -261,16 +261,6 @@ pub fn track_row(
                 on_play(window, cx);
             }
         })
-        .when(playable && !is_current, |row| {
-            // The first click of a double click gets the device ready (no
-            // track is fetched: Spotify limits those, and most single clicks
-            // only select).
-            row.on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                if event.click_count == 1 {
-                    app::player(cx).update(cx, |p, _| p.prepare_to_play());
-                }
-            })
-        })
         .on_mouse_down(MouseButton::Right, move |event, _, cx| {
             menus::track_menu(&t, menu.clone(), event.position, cx);
         })

@@ -2,48 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Quality {
-    Low,
-    Normal,
-    High,
-}
-
-impl Quality {
-    pub const ALL: [Quality; 3] = [Quality::Low, Quality::Normal, Quality::High];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Quality::Low => "Low · 96 kbps",
-            Quality::Normal => "Normal · 160 kbps",
-            Quality::High => "Very high · 320 kbps",
-        }
-    }
-}
-
-/// What plays audio on this computer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Engine {
-    /// The built-in player, and Soloist while Spotify refuses it.
-    Automatic,
-    Builtin,
-    Soloist,
-}
-
-impl Engine {
-    pub const ALL: [Engine; 3] = [Engine::Automatic, Engine::Builtin, Engine::Soloist];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Engine::Automatic => "Automatic",
-            Engine::Builtin => "Built-in",
-            Engine::Soloist => "Soloist",
-        }
-    }
-}
-
 /// How the lyrics page looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,9 +27,6 @@ impl LyricsStyle {
 #[serde(default)]
 pub struct Settings {
     pub volume: f32,
-    pub quality: Quality,
-    pub normalize: bool,
-    pub gapless: bool,
     pub autoplay_on_start: bool,
     pub sidebar_collapsed: bool,
     pub show_now_playing: bool,
@@ -85,7 +40,6 @@ pub struct Settings {
     pub lrclib_lyrics: bool,
     /// Release date of the newest What's New item the user has seen.
     pub whats_new_seen: String,
-    pub engine: Engine,
     /// Replace the Soloist build before it expires.
     pub soloist_auto_update: bool,
     /// Draw the window on the GPU. Off draws it on the CPU (Linux only).
@@ -96,9 +50,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             volume: 0.7,
-            quality: Quality::High,
-            normalize: true,
-            gapless: true,
             autoplay_on_start: false,
             sidebar_collapsed: false,
             show_now_playing: true,
@@ -109,7 +60,6 @@ impl Default for Settings {
             media_keys: true,
             lrclib_lyrics: false,
             whats_new_seen: String::new(),
-            engine: Engine::Automatic,
             soloist_auto_update: true,
             hardware_acceleration: true,
         }
@@ -138,9 +88,9 @@ mod tests {
     #[test]
     fn unknown_and_missing_fields_fall_back_to_defaults() {
         let s: Settings =
-            serde_json::from_str(r#"{"volume":0.25,"quality":"low","nope":1}"#).unwrap();
+            serde_json::from_str(r#"{"volume":0.25,"lyrics_style":"simple","nope":1}"#).unwrap();
         assert_eq!(s.volume, 0.25);
-        assert_eq!(s.quality, Quality::Low);
-        assert!(s.normalize);
+        assert_eq!(s.lyrics_style, LyricsStyle::Simple);
+        assert!(s.media_keys);
     }
 }
