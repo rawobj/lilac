@@ -396,6 +396,7 @@ impl Soloist {
             .stderr(Stdio::piped())
             .spawn()
             .context("could not start Soloist")?;
+        end_with_us_started(&child);
 
         self.generation += 1;
         let generation = self.generation;
@@ -1119,7 +1120,9 @@ fn terminate(pid: u32) {
 }
 
 /// Have the system end Soloist when Lilac goes, however it goes (a crash
-/// or a kill leaves no chance to stop it). Linux only; elsewhere the next
+/// or a kill leaves no chance to stop it, and even a clean quit exits
+/// before `stop_process`'s thread gets to run). Linux sets it up before the
+/// start, Windows right after (`end_with_us_started`); elsewhere the next
 /// start ends a leftover one (`end_stale`).
 fn end_with_us(command: &mut Command) {
     #[cfg(target_os = "linux")]
@@ -1133,6 +1136,109 @@ fn end_with_us(command: &mut Command) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = command;
+}
+
+/// On Windows: Soloist goes into a job that ends everything in it once the
+/// last handle to the job closes, and the only handle is Lilac's, which the
+/// system closes when Lilac's process ends.
+fn end_with_us_started(child: &std::process::Child) {
+    #[cfg(windows)]
+    job::adopt(child);
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+#[cfg(windows)]
+mod job {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::sync::OnceLock;
+
+    type Handle = *mut c_void;
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io_counters: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(job: Handle, class: i32, info: *const c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    }
+
+    /// One job for every Soloist Lilac starts, kept open until Lilac ends.
+    fn job() -> Option<Handle> {
+        static JOB: OnceLock<Option<usize>> = OnceLock::new();
+        let job = JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                log::warn!(
+                    "soloist: no job object: {}",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+            let mut limits = ExtendedLimits::default();
+            limits.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&raw const limits).cast(),
+                size_of::<ExtendedLimits>() as u32,
+            );
+            if set == 0 {
+                log::warn!(
+                    "soloist: job object limits: {}",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+            Some(job as usize)
+        });
+        job.map(|job| job as Handle)
+    }
+
+    #[cfg(all(test, target_pointer_width = "64"))]
+    #[test]
+    fn limits_match_the_system_layout() {
+        // JOBOBJECT_EXTENDED_LIMIT_INFORMATION on 64-bit Windows.
+        assert_eq!(size_of::<ExtendedLimits>(), 144);
+    }
+
+    pub fn adopt(child: &std::process::Child) {
+        let Some(job) = job() else { return };
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0 {
+            log::warn!(
+                "soloist: not tied to Lilac: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 }
 
 struct Downloaded {
