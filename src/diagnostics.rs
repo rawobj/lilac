@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -142,12 +143,42 @@ fn tail() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Set once the window has closed: what gpui says after that is about the
+/// window it just tore down.
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// The window is gone and Lilac is on its way out.
+pub fn window_closed() {
+    CLOSING.store(true, Ordering::Relaxed);
+}
+
+/// Whether a library's record belongs in the log.
+fn worth_logging(target: &str, level: log::Level, closing: bool) -> bool {
+    // symphonia warns for every junk frame it skips, hundreds a second on a
+    // bad file, which would push everything else out of a report's tail;
+    // librespot says when the file really fails.
+    if target.starts_with("symphonia") {
+        return level <= log::Level::Error;
+    }
+    // gpui logs its own errors with an empty target. After the window closes
+    // they are about the window just destroyed ("window not found", "Invalid
+    // window handle" on Windows): nothing went wrong.
+    if closing && target.is_empty() {
+        return false;
+    }
+    level <= log::Level::Warn
+}
+
 /// Warnings and errors from the libraries (librespot above all) go to the log.
 struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Warn
+        worth_logging(
+            metadata.target(),
+            metadata.level(),
+            CLOSING.load(Ordering::Relaxed),
+        )
     }
 
     fn log(&self, record: &log::Record) {
@@ -496,6 +527,19 @@ pub fn test_report(checks: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noisy_records_stay_out_of_the_log() {
+        use log::Level::{Error, Warn};
+        let mp3 = "symphonia_bundle_mp3::demuxer";
+        assert!(!worth_logging(mp3, Warn, false));
+        assert!(worth_logging(mp3, Error, false));
+        assert!(worth_logging("librespot_playback::player", Warn, false));
+        // gpui's own errors count until the window is gone.
+        assert!(worth_logging("", Error, false));
+        assert!(!worth_logging("", Error, true));
+        assert!(worth_logging("librespot_core::session", Warn, true));
+    }
 
     #[test]
     fn reports_leave_out_who_the_user_is() {

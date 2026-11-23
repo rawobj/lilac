@@ -90,6 +90,8 @@ fn main() {
                 async {}
             })
             .detach();
+            cx.on_window_closed(|_, _| diagnostics::window_closed())
+                .detach();
             // The last run crashed or ended without closing: offer its report.
             if let Some(last) = diagnostics::last_run() {
                 app::ui(cx).update(cx, |ui, cx| {
