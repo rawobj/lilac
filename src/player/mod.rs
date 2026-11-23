@@ -1041,7 +1041,7 @@ impl Player {
             && let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string())
         {
             // Nothing plays yet: start where we were, on Soloist.
-            let context = self.connect_context.clone();
+            let context = remote_context(self.connect_context.clone());
             // A list Lilac did not start (Spotify's last state) is known only
             // by its URI: no tracks, so the start is not taken for its top.
             let tracks = if self.started_tracks.contains(&uri) {
@@ -2007,17 +2007,17 @@ impl Player {
                     // plays that track and queues the rest.
                     let from_top = context.is_some()
                         && offset.as_ref().is_none_or(|o| tracks.first() == Some(o));
+                    // Soloist starts a URI at its beginning; the place is
+                    // sought once that track plays.
+                    let seek = (position_ms > 0)
+                        .then(|| offset.clone().map(|uri| (uri, position_ms)))
+                        .flatten();
                     if from_top
                         || device_id == crate::soloist::LOCAL_DEVICE
                         || crate::spotify::api::penalty_left().is_some()
                     {
-                        // Soloist starts a URI at its beginning; the place
-                        // is sought once that track plays.
-                        if position_ms > 0
-                            && let (Some(player), Some(uri)) = (player.upgrade(), offset.clone())
-                        {
-                            player
-                                .update(cx, |p, _| p.seek_when_playing = Some((uri, position_ms)));
+                        if let Some(player) = player.upgrade() {
+                            player.update(cx, |p, _| p.seek_when_playing = seek);
                         }
                         play_locally(context.as_deref(), &tracks, offset.as_deref(), cx);
                         return;
@@ -2039,6 +2039,9 @@ impl Player {
                         };
                         if runtime::run(call).await.is_err() {
                             cx.update(|cx| {
+                                if let Some(player) = player.upgrade() {
+                                    player.update(cx, |p, _| p.seek_when_playing = seek);
+                                }
                                 play_locally(
                                     local_context.as_deref(),
                                     &local_tracks,
@@ -2753,7 +2756,9 @@ fn unix_ms() -> u64 {
 /// starting track within an artist ("Can't have offset for context type:
 /// ARTIST"), so artist pages send their track list instead.
 fn remote_context(context: Option<String>) -> Option<String> {
-    context.filter(|c| !c.starts_with("spotify:artist:"))
+    // Soloist names the seed track as the context of autoplay after it; the
+    // Web API refuses a track as a context.
+    context.filter(|c| !c.starts_with("spotify:artist:") && !c.starts_with("spotify:track:"))
 }
 
 /// Start playback through Soloist's local socket, without Spotify's Web
