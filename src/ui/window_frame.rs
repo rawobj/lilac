@@ -35,14 +35,21 @@ pub fn needs_buttons(window: &Window) -> bool {
 /// double click.
 pub trait DragsWindow: InteractiveElement + Sized {
     fn drags_window(self) -> Self {
-        self.window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
+        let area = self.window_control_area(WindowControlArea::Drag);
+        // Windows does all of it from the hit test, and better: a double click
+        // also restores, and dragging a maximized window restores it.
+        // `zoom_window` there only ever maximizes, so a double click handled
+        // here would undo the system's restore.
+        if cfg!(windows) {
+            return area;
+        }
+        area.on_mouse_down(MouseButton::Left, |event, window, _| {
+            if event.click_count == 2 {
+                window.zoom_window();
+            } else {
+                window.start_window_move();
+            }
+        })
     }
 }
 
@@ -62,25 +69,56 @@ pub fn buttons(window: &Window) -> Option<Div> {
             .items_center()
             .gap(px(BUTTON_GAP))
             .when(supported.minimize, |row| {
-                row.child(
-                    button("minimize", icons::MINUS, false)
-                        .window_control_area(WindowControlArea::Min)
-                        .on_click(|_, window, _| window.minimize_window()),
-                )
+                row.child(control(
+                    "minimize",
+                    icons::MINUS,
+                    false,
+                    WindowControlArea::Min,
+                    |window| window.minimize_window(),
+                ))
             })
             .when(supported.maximize, |row| {
-                row.child(
-                    button("maximize", icons::SQUARE, false)
-                        .window_control_area(WindowControlArea::Max)
-                        .on_click(|_, window, _| window.zoom_window()),
-                )
+                let icon = if window.is_maximized() {
+                    icons::WINDOW_RESTORE
+                } else {
+                    icons::SQUARE
+                };
+                row.child(control(
+                    "maximize",
+                    icon,
+                    false,
+                    WindowControlArea::Max,
+                    |window| window.zoom_window(),
+                ))
             })
-            .child(
-                button("close", icons::X, true)
-                    .window_control_area(WindowControlArea::Close)
-                    .on_click(|_, window, _| window.remove_window()),
-            ),
+            .child(control(
+                "close",
+                icons::X,
+                true,
+                WindowControlArea::Close,
+                |window| window.remove_window(),
+            )),
     )
+}
+
+fn control(
+    id: &'static str,
+    icon: &'static str,
+    danger: bool,
+    area: WindowControlArea,
+    action: fn(&mut Window),
+) -> Stateful<Div> {
+    let control = button(id, icon, danger).window_control_area(area);
+    // Windows presses these itself, from the hit test, unless the press is
+    // taken here first. It also restores a maximized window, where
+    // `zoom_window` only ever maximizes.
+    if cfg!(windows) {
+        return control;
+    }
+    control
+        // A press here is a click, not the start of a window drag.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, _| action(window))
 }
 
 /// The buttons on their own in the top-right corner, where the top bar would
@@ -108,8 +146,6 @@ fn button(id: &'static str, icon: &'static str, danger: bool) -> Stateful<Div> {
         .justify_center()
         .rounded_full()
         .occlude()
-        // A press here is a click, not the start of a window drag.
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .hover(move |s| {
             s.bg(if danger {
                 theme::danger().opacity(0.8)

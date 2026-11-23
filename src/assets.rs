@@ -79,6 +79,7 @@ icons![
     "volume-1",
     "volume-2",
     "volume-x",
+    "window-restore",
     "x",
 ];
 

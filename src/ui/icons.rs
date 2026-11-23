@@ -66,5 +66,6 @@ icon_paths! {
     VOLUME_LOW = "volume",
     VOLUME_MID = "volume-1",
     VOLUME_MUTE = "volume-x",
+    WINDOW_RESTORE = "window-restore",
     X = "x",
 }
