@@ -133,7 +133,9 @@ fn status(text: impl Into<SharedString>, busy: bool) -> Div {
         .items_center()
         .gap_2()
         .when(busy, |d| d.child(ui::spinner(14.0)))
-        .child(text.into())
+        // Bare text in a flex row keeps its one-line width; a shrinkable
+        // box lets it wrap to the dialog.
+        .child(div().flex_1().min_w_0().child(text.into()))
 }
 
 fn notice(text: impl Into<SharedString>) -> Div {
