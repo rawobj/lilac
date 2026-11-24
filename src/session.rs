@@ -28,12 +28,18 @@ pub enum SessionEvent {
 
 pub struct Session {
     pub status: Status,
+    /// Signed in through the browser just now (not from a stored login):
+    /// the first start of an account, when setup is offered.
+    pub just_signed_in: bool,
     /// Web API access through lilac's own client.
     pub api: Api,
     /// Tokens of the desktop client for the streaming session.
     pub streaming: Arc<Auth>,
-    /// What the browser is being asked for during the two-step login.
-    pub login_step: Option<SharedString>,
+    /// Which approval of the sign-in is open: 0 playback, 1 library.
+    pub login_step: Option<usize>,
+    /// The approval page of the current sign-in step, for the user to open
+    /// in the browser where they are logged in to Spotify.
+    pub login_url: Option<SharedString>,
     pub user: Option<User>,
     pub error: Option<SharedString>,
     login: Option<Task<()>>,
@@ -52,9 +58,11 @@ impl Session {
             } else {
                 Status::LoggedOut
             },
+            just_signed_in: false,
             api,
             streaming,
             login_step: None,
+            login_url: None,
             user: None,
             error: None,
             login: None,
@@ -93,50 +101,47 @@ impl Session {
     }
 
     /// Start the browser login: the desktop client for streaming, then
-    /// lilac's own client for the Web API.
+    /// lilac's own client for the Web API. Each step waits at its approval
+    /// page until the user opens it ([`Session::login_url`]).
     pub fn login(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.status = Status::WaitingForBrowser;
-        self.login_step = Some("Step 1 of 2: allow playback".into());
         cx.notify();
 
         let web = self.api.auth.clone();
         let streaming = self.streaming.clone();
         self.login = Some(cx.spawn(async move |this, cx| {
-            let result = runtime::run(async move {
-                let credentials = oauth::login(&streaming.client).await?;
-                credentials.save(&streaming.client)?;
-                streaming.set(Some(credentials)).await;
-                Ok(())
-            })
-            .await;
-            let next = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.login_step = Some("Step 2 of 2: allow access to your library".into());
+            let step = async |this: &WeakEntity<Self>,
+                              cx: &mut AsyncApp,
+                              index: usize,
+                              auth: Arc<Auth>|
+                   -> Result<()> {
+                let login = oauth::Login::start(&auth.client)?;
+                this.update(cx, |this, cx| {
+                    this.login_step = Some(index);
+                    this.login_url = Some(login.url.clone().into());
                     cx.notify();
-                    true
-                }
-                Err(err) => {
-                    this.fail(err, cx);
-                    false
-                }
-            });
-            if !matches!(next, Ok(true)) {
-                return;
-            }
-
-            let result = runtime::run(async move {
-                let credentials = oauth::login(&web.client).await?;
-                credentials.save(&web.client)?;
-                web.set(Some(credentials)).await;
-                Ok(())
-            })
-            .await;
-
+                })?;
+                runtime::run(async move {
+                    let credentials = login.finish().await?;
+                    credentials.save(&auth.client)?;
+                    auth.set(Some(credentials)).await;
+                    Ok(())
+                })
+                .await
+            };
+            let result = match step(&this, cx, 0, streaming).await {
+                Ok(()) => step(&this, cx, 1, web).await,
+                Err(err) => Err(err),
+            };
             this.update(cx, |this, cx| {
                 this.login_step = None;
+                this.login_url = None;
                 match result {
-                    Ok(()) => this.fetch_profile(cx),
+                    Ok(()) => {
+                        this.just_signed_in = true;
+                        this.fetch_profile(cx)
+                    }
                     Err(err) => this.fail(err, cx),
                 }
             })
@@ -147,6 +152,7 @@ impl Session {
     pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
         self.login = None;
         self.login_step = None;
+        self.login_url = None;
         oauth::cancel_login();
         self.status = Status::LoggedOut;
         cx.notify();

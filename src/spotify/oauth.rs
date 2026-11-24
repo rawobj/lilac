@@ -142,7 +142,7 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Open the browser and wait for the user to approve `client`.
+/// A sign-in waiting for the user to approve `client` at [`Login::url`].
 ///
 /// The authorization code flow with PKCE, run by Lilac itself rather than
 /// librespot-oauth: its loopback listener takes the first request that
@@ -150,32 +150,65 @@ fn now() -> u64 {
 /// first, which failed the login and closed the port before the real
 /// redirect came. This one answers stray requests and keeps waiting.
 /// [`cancel_login`] ends it early.
-pub async fn login(client: &Client) -> Result<Credentials> {
-    let verifier = random_token(48);
-    let state = random_token(16);
-    let challenge = {
-        use sha2::Digest as _;
-        base64_url(&sha2::Sha256::digest(verifier.as_bytes()))
-    };
-    let url = format!(
-        "https://accounts.spotify.com/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge_method=S256&code_challenge={challenge}&state={state}",
-        client.id,
-        super::enc(REDIRECT_URI),
-        super::enc(&client.scopes.join(" ")),
-    );
-    let listener = std::net::TcpListener::bind(("127.0.0.1", REDIRECT_PORT))
-        .with_context(|| format!("port {REDIRECT_PORT} is in use; is another Lilac signing in?"))?;
-    open::that_detached(&url).context("could not open the browser")?;
-    let expected = state.clone();
-    let code = tokio::task::spawn_blocking(move || wait_for_code(listener, &expected))
-        .await
-        .map_err(|e| anyhow!("login task failed: {e}"))??;
+///
+/// Lilac does not open the URL itself: the browser logged in to Spotify is
+/// not always the default one, so the user opens or copies it.
+pub struct Login {
+    pub url: String,
+    client_id: &'static str,
+    verifier: String,
+    state: String,
+    listener: std::net::TcpListener,
+}
 
+impl Login {
+    pub fn start(client: &Client) -> Result<Self> {
+        let verifier = random_token(48);
+        let state = random_token(16);
+        let challenge = {
+            use sha2::Digest as _;
+            base64_url(&sha2::Sha256::digest(verifier.as_bytes()))
+        };
+        let url = format!(
+            "https://accounts.spotify.com/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge_method=S256&code_challenge={challenge}&state={state}",
+            client.id,
+            super::enc(REDIRECT_URI),
+            super::enc(&client.scopes.join(" ")),
+        );
+        let listener = std::net::TcpListener::bind(("127.0.0.1", REDIRECT_PORT)).with_context(
+            || format!("port {REDIRECT_PORT} is in use; is another Lilac signing in?"),
+        )?;
+        Ok(Self {
+            url,
+            client_id: client.id,
+            verifier,
+            state,
+            listener,
+        })
+    }
+
+    /// Wait for the approval and trade its code for tokens.
+    pub async fn finish(self) -> Result<Credentials> {
+        let Self {
+            client_id,
+            verifier,
+            state,
+            listener,
+            ..
+        } = self;
+        let code = tokio::task::spawn_blocking(move || wait_for_code(listener, &state))
+            .await
+            .map_err(|e| anyhow!("login task failed: {e}"))??;
+        exchange(client_id, &code, &verifier).await
+    }
+}
+
+async fn exchange(client_id: &str, code: &str, verifier: &str) -> Result<Credentials> {
     let body = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={verifier}",
-        super::enc(&code),
+        super::enc(code),
         super::enc(REDIRECT_URI),
-        client.id,
+        client_id,
     );
     let response = super::http()
         .post("https://accounts.spotify.com/api/token")
@@ -202,7 +235,7 @@ pub async fn login(client: &Client) -> Result<Credentials> {
         access_token: token.access_token,
         refresh_token: token.refresh_token,
         expires_at: now() + token.expires_in.max(60),
-        client_id: client.id.to_string(),
+        client_id: client_id.to_string(),
     })
 }
 

@@ -216,7 +216,9 @@ fn key_step(key: &Entity<InputState>) -> (AnyElement, Option<AnyElement>) {
              with your Spotify account if it asks."
                 .into(),
             "Accept the terms and copy the key it shows (it starts with spak_).".into(),
-            "Come back here and click Paste.".into(),
+            "Come back to Lilac: it picks the key up from the clipboard by itself \
+             (or click Paste)."
+                .into(),
         ]))
         .child(
             div()

@@ -177,6 +177,37 @@ impl Lilac {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        // Back from the browser with Soloist's key copied: take it from
+        // the clipboard, so the key step needs no paste. On Wayland the
+        // clipboard reaches a window a moment after it is activated.
+        cx.observe_window_activation(window, |_: &mut Self, window, cx| {
+            if !window.is_window_active() {
+                return;
+            }
+            cx.spawn(async move |_, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                cx.update(take_key_from_clipboard);
+            })
+            .detach();
+        })
+        .detach();
+        // A Premium account signing in for the first time gets Soloist's
+        // setup straight away, not at its first Play.
+        cx.subscribe(
+            &app::session(cx),
+            |_: &mut Self, session, event: &crate::session::SessionEvent, cx| {
+                if !matches!(event, crate::session::SessionEvent::Ready) {
+                    return;
+                }
+                let first = session.update(cx, |s, _| std::mem::take(&mut s.just_signed_in));
+                if first && !session.read(cx).is_free() && !app::soloist(cx).read(cx).usable() {
+                    cx.defer(crate::soloist::Soloist::open_setup);
+                }
+            },
+        )
+        .detach();
         // Only the Soloist dialogs show its state; spare the window the
         // download progress otherwise.
         cx.observe(&app::soloist(cx), |this: &mut Self, _, cx| {
@@ -529,4 +560,23 @@ fn free_banner() -> Div {
                      preview. Full playback isn't supported here; it needs Spotify Premium.",
                 )),
         )
+}
+
+/// The Soloist setup waits for the key: take it from the clipboard when one
+/// is there.
+fn take_key_from_clipboard(cx: &mut App) {
+    if app::ui(cx).read(cx).dialog != Some(Dialog::SoloistSetup)
+        || app::soloist(cx).read(cx).step() != crate::soloist::Step::Key
+    {
+        return;
+    }
+    let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+        return;
+    };
+    let key = text.trim();
+    if key.starts_with("spak_") && key.len() > 16 && !key.contains(char::is_whitespace) {
+        let key = key.to_string();
+        app::soloist(cx).update(cx, |s, cx| s.set_api_key(key, cx));
+        app::toast("Soloist key taken from the clipboard", cx);
+    }
 }
