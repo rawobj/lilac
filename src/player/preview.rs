@@ -5,20 +5,19 @@ use std::io::Cursor;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source as _};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source as _};
 
 /// Length of a clip when the decoder cannot tell.
 pub const CLIP_MS: u32 = 30_000;
 
 /// The sound output, opened on the first clip and kept.
 pub struct Output {
-    stream: OutputStream,
+    stream: MixerDeviceSink,
 }
 
 impl Output {
     pub fn open() -> Result<Self> {
-        let mut stream =
-            OutputStreamBuilder::open_default_stream().context("no sound output found")?;
+        let mut stream = DeviceSinkBuilder::open_default_sink().context("no sound output found")?;
         stream.log_on_drop(false);
         Ok(Self { stream })
     }
@@ -38,7 +37,7 @@ impl Output {
             .map(|d| d.as_millis() as u32)
             .filter(|ms| *ms > 0)
             .unwrap_or(CLIP_MS);
-        let sink = Sink::connect_new(self.stream.mixer());
+        let sink = Player::connect_new(self.stream.mixer());
         sink.set_volume(volume);
         sink.append(source);
         let clip = Clip { sink };
@@ -51,7 +50,7 @@ impl Output {
 
 /// One clip playing. Dropping it stops it.
 pub struct Clip {
-    sink: Sink,
+    sink: Player,
 }
 
 impl Clip {

@@ -19,11 +19,11 @@ pub fn send(summary: &str, body: &str) {
 mod linux {
     use std::collections::HashMap;
 
-    use mpris_server::zbus::{self, zvariant::Value};
+    use mpris_server::zbus::{self, Variant};
 
     pub async fn send(summary: &str, body: &str) -> zbus::Result<()> {
         let connection = zbus::Connection::session().await?;
-        let hints: HashMap<&str, Value<'_>> = HashMap::new();
+        let hints: HashMap<&str, Variant<'_>> = HashMap::new();
         connection
             .call_method(
                 Some("org.freedesktop.Notifications"),
