@@ -9,7 +9,7 @@ license = "MIT"
 embed-resource = "3.0.11"
 
 [dependencies]
-gpui-kit = "=0.8.0"
+gpui-kit = "=0.11.0"
 anyhow = "1.0.104"
 tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros", "fs"] }
 sha2 = "0.10.9"

@@ -437,7 +437,7 @@ impl Render for Sidebar {
                 .overflow_x_scroll()
                 .restrict_scroll_to_axis()
                 .track_scroll(&self.chips_scroll)
-                .on_scroll_wheel(shift_scrolls_sideways(self.chips_scroll.clone()));
+                .on_scroll(shift_scrolls_sideways(self.chips_scroll.clone()));
             for (filter, label) in FILTERS {
                 row = row.child(
                     ui::chip(label, label, self.filter == Some(filter))

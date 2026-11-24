@@ -791,7 +791,7 @@ impl Render for ArtistPage {
             .relative()
             .size_full()
             .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| cx.notify()))
+            .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| cx.notify()))
             .child(backdrop)
             .child(scroll_page("artist", &self.scroll, content))
     }

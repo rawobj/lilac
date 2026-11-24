@@ -152,7 +152,7 @@ impl RenderOnce for Shelf {
                             // Vertical wheel and swipes belong to the page, sideways ones to the shelf.
                             .restrict_scroll_to_axis()
                             .track_scroll(&scroll)
-                            .on_scroll_wheel(shift_scrolls_sideways(scroll.clone()))
+                            .on_scroll(shift_scrolls_sideways(scroll.clone()))
                             // Room for the scrollbar under the cards and
                             // their hover background (padding on the
                             // scrolling row itself is not laid out).
@@ -184,7 +184,7 @@ impl RenderOnce for Shelf {
 /// translate it for us, and a mouse wheel has no other way to reach the row.
 pub fn shift_scrolls_sideways(
     scroll: ScrollHandle,
-) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+) -> impl Fn(&ScrollEvent, &mut Window, &mut App) + 'static {
     move |event, window, cx| {
         if !event.modifiers.shift {
             return;

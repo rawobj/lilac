@@ -243,7 +243,7 @@ impl LyricsPage {
             .flex()
             .flex_col()
             .gap_2()
-            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
                 if this.following {
                     this.following = false;
                     this.glide = None;
