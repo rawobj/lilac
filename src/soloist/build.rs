@@ -77,6 +77,14 @@ pub fn parse_version(line: &str) -> Option<(String, u64)> {
     Some((version, built_at))
 }
 
+/// Soloist 1.4 and later keep the API key themselves (`setup-api-key`).
+pub fn stores_key(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    (major, minor) >= (1, 4)
+}
+
 /// When to look for a newer build again: daily, and every few hours once
 /// the installed one is close to expiring.
 pub fn next_check(build: Option<&Build>, last_check: u64, now: u64) -> u64 {
@@ -122,6 +130,14 @@ pub fn reminder(build: &Build, now: u64) -> Reminder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_which_builds_keep_the_key() {
+        assert!(!stores_key("1.3.10.86"));
+        assert!(stores_key("1.4.0.1"));
+        assert!(stores_key("2.0"));
+        assert!(!stores_key("nonsense"));
+    }
 
     fn build(built_at: u64) -> Build {
         Build {

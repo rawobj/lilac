@@ -51,6 +51,8 @@ pub struct Store {
     pub newer: Option<String>,
     /// The loudest expiry reminder shown for the installed build.
     pub reminded: Option<(u64, Reminder)>,
+    /// A fingerprint of the key Soloist keeps itself (see `hand_over_key`).
+    pub key_handed_over: Option<u64>,
 }
 
 impl Store {
@@ -328,6 +330,42 @@ impl Soloist {
         }
     }
 
+    /// Give Soloist the key to keep, once (and again when it changes), so
+    /// it need not go on the command line, where any program can read it.
+    /// Soloist must not be running: it locks its data folder. False when
+    /// Soloist could not take it; the key then goes on the command line.
+    fn hand_over_key(&mut self, key: &str, data: &Path) -> bool {
+        let fingerprint = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        let kept = data.join("credentials").join("api_key").exists();
+        if kept && self.store.key_handed_over == Some(fingerprint) {
+            return true;
+        }
+        let saved = (|| -> Result<bool> {
+            use std::io::Write as _;
+            let mut child = process::background(binary())
+                .arg("setup-api-key")
+                .arg("--data-dir")
+                .arg(data)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                writeln!(stdin, "{key}")?;
+            }
+            Ok(child.wait()?.success())
+        })()
+        .unwrap_or(false);
+        self.store.key_handed_over = saved.then_some(fingerprint);
+        self.store.save();
+        saved
+    }
+
     fn spawn(&mut self, cx: &mut Context<Self>) -> Result<()> {
         let build = self.installed().context("Soloist is not installed")?;
         if build.expired(now()) {
@@ -345,14 +383,24 @@ impl Soloist {
         std::fs::create_dir_all(&data)?;
         std::fs::create_dir_all(&cache)?;
         end_stale(&data);
+        // Its stored login and key are the user's alone.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700));
+        }
+        let handed_over = build::stores_key(&build.version) && self.hand_over_key(&key, &data);
         let _ = std::fs::remove_file(data.join("ws.port"));
         let _ = std::fs::remove_file(data.join("ws.addr"));
 
         let volume = (app::settings(cx).read(cx).volume * 100.0).round() as u32;
         let mut command = process::background(binary());
         end_with_us(&mut command);
+        command.args(["--device-name", DEVICE_NAME]);
+        if !handed_over {
+            command.args(["--api-key", &key]);
+        }
         let mut child = command
-            .args(["--device-name", DEVICE_NAME, "--api-key", &key])
             .arg("--data-dir")
             .arg(&data)
             .arg("--cache-dir")
