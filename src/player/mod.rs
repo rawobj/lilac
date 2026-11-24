@@ -718,22 +718,8 @@ impl Player {
             && self.plays_on_soloist(cx)
             && let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string())
         {
-            let position = self.position_ms();
-            if self.take_over_held(&uri, position, cx) {
-                return;
-            }
             // Nothing plays yet: start where we were, on Soloist.
-            let context = remote_context(self.connect_context.clone());
-            // A list Lilac did not start (Spotify's last state) is known only
-            // by its URI: no tracks, so the start is not taken for its top.
-            let tracks = if self.started_tracks.contains(&uri) {
-                self.started_tracks.clone()
-            } else if context.is_some() {
-                Vec::new()
-            } else {
-                vec![uri.clone()]
-            };
-            self.play_on_soloist(context, tracks, Some(uri), position, cx);
+            self.continue_on_soloist(uri, cx);
             return;
         }
         if self.previews(cx) {
@@ -1324,16 +1310,27 @@ impl Player {
     /// Play the current track through Soloist, where it is (used when the
     /// setup finishes).
     pub fn play_here_on_soloist(&mut self, cx: &mut Context<Self>) {
-        let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string()) else {
+        if let Some(uri) = self.current.as_ref().map(|t| t.uri.to_string()) {
+            self.continue_on_soloist(uri, cx);
+        }
+    }
+
+    /// Play the shown song `uri` on Soloist from where it stands, in its list.
+    fn continue_on_soloist(&mut self, uri: String, cx: &mut Context<Self>) {
+        let position = self.position_ms();
+        if self.take_over_held(&uri, position, cx) {
             return;
-        };
-        let context = self.connect_context.clone();
+        }
+        let context = remote_context(self.connect_context.clone());
+        // A list Lilac did not start (Spotify's last state) is known only
+        // by its URI: no tracks, so the start is not taken for its top.
         let tracks = if self.started_tracks.contains(&uri) {
             self.started_tracks.clone()
+        } else if context.is_some() {
+            Vec::new()
         } else {
             vec![uri.clone()]
         };
-        let position = self.position_ms();
         self.play_on_soloist(context, tracks, Some(uri), position, cx);
     }
 
