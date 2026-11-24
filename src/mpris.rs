@@ -54,21 +54,36 @@ pub fn init(cx: &mut App) {
         connect(&bus, tx);
         cx.foreground_executor().spawn(bus.run()).detach();
 
-        // Push player changes to the bus.
+        // Push player changes to the bus: what is on screen already (a
+        // restored track), then every change. Volume and shuffle change
+        // without a PlayerEvent; seeks are announced as such.
         let pushed = bus.clone();
-        let subscription = cx.update(|cx| {
+        let observed = bus.clone();
+        let (initial, subscriptions) = cx.update(|cx| {
             let player = app::player(cx);
-            cx.subscribe(&player, move |player, event: &PlayerEvent, cx| {
+            let initial = Snapshot::of(&player, cx);
+            let seeks = cx.subscribe(&player, move |player, event: &PlayerEvent, cx| {
+                if !matches!(event, PlayerEvent::Seeked) {
+                    return;
+                }
                 let state = Snapshot::of(&player, cx);
                 let bus = pushed.clone();
-                let seeked = matches!(event, PlayerEvent::Seeked);
                 cx.foreground_executor()
-                    .spawn(async move { state.push(&bus, seeked).await })
+                    .spawn(async move { state.push(&bus, true).await })
                     .detach();
-            })
+            });
+            let changes = cx.observe(&player, move |player, cx| {
+                let state = Snapshot::of(&player, cx);
+                let bus = observed.clone();
+                cx.foreground_executor()
+                    .spawn(async move { state.push(&bus, false).await })
+                    .detach();
+            });
+            (initial, (seeks, changes))
         });
+        initial.push(&bus, false).await;
         // Held for as long as the bridge runs.
-        let _subscription = subscription;
+        let _subscriptions = subscriptions;
 
         while let Some(request) = rx.recv().await {
             cx.update(|cx| handle(request, cx));
@@ -188,7 +203,8 @@ impl Snapshot {
             } else if let Some(show) = &track.show {
                 metadata.set_album(Some(show.name.to_string()));
             }
-            metadata.set_length(Some(Time::from_millis(track.duration_ms as i64)));
+            // A preview's length while one plays.
+            metadata.set_length(Some(Time::from_millis(p.duration_ms() as i64)));
             if let Some(art) = track.cover().for_size(640) {
                 metadata.set_art_url(Some(art.to_string()));
             }
