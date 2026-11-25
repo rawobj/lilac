@@ -115,6 +115,8 @@ impl Render for TopBar {
             .id("top-bar")
             .size_full()
             .px_3()
+            // macOS draws its traffic lights over the top-left corner.
+            .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
             .flex()
             .items_center()
             .gap_2()
