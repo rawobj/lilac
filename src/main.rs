@@ -85,17 +85,23 @@ fn main() {
             };
 
             gpui_kit::open_window(options, cx, |window, cx| {
+                // On Windows gpui asks the window for its placement while
+                // destroying it, before any window-closed observer runs.
+                window.on_window_should_close(cx, |_, _| {
+                    diagnostics::closing();
+                    true
+                });
                 cx.new(|cx| views::Lilac::new(window, cx))
             })
             .expect("failed to open window");
             cx.activate(true);
             cx.on_app_quit(|_| {
+                diagnostics::closing();
                 diagnostics::clean_exit();
                 async {}
             })
             .detach();
-            cx.on_window_closed(|_, _| diagnostics::window_closed())
-                .detach();
+            cx.on_window_closed(|_, _| diagnostics::closing()).detach();
             // The last run crashed or ended without closing: offer its report.
             if let Some(last) = diagnostics::last_run() {
                 app::ui(cx).update(cx, |ui, cx| {

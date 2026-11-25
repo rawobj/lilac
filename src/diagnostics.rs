@@ -143,12 +143,12 @@ fn tail() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Set once the window has closed: what gpui says after that is about the
-/// window it just tore down.
+/// Set once Lilac starts closing: what gpui says after that is about the
+/// window it tears down.
 static CLOSING: AtomicBool = AtomicBool::new(false);
 
-/// The window is gone and Lilac is on its way out.
-pub fn window_closed() {
+/// The window is closing (or gone) and Lilac is on its way out.
+pub fn closing() {
     CLOSING.store(true, Ordering::Relaxed);
 }
 
@@ -160,8 +160,8 @@ fn worth_logging(target: &str, level: log::Level, closing: bool) -> bool {
     if target.starts_with("symphonia") {
         return level <= log::Level::Error;
     }
-    // gpui logs its own errors with an empty target. After the window closes
-    // they are about the window just destroyed ("window not found", "Invalid
+    // gpui logs its own errors with an empty target. Once the window closes
+    // they are about the window being destroyed ("window not found", "Invalid
     // window handle" on Windows): nothing went wrong.
     if closing && target.is_empty() {
         return false;
