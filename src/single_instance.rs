@@ -4,7 +4,8 @@
 //!
 //! The first instance listens on a local socket (a Unix socket, or a
 //! loopback TCP port named in a file on Windows); a later one connects,
-//! says "show" and exits.
+//! says "show" and exits. On Windows a named mutex also tells a later one
+//! that a Lilac runs even when the port cannot be reached.
 
 use std::io::{BufRead as _, BufReader};
 
@@ -19,6 +20,17 @@ pub type Requests = mpsc::UnboundedReceiver<()>;
 /// `None` when another instance is running and has been asked to show
 /// itself: this one should exit.
 pub fn claim() -> Option<Requests> {
+    if other_alive() {
+        // It may still be starting and not listening yet; it shows itself
+        // anyway once it is up, so asking is only to bring it forward.
+        for _ in 0..20 {
+            if ask_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return None;
+    }
     if ask_running() {
         return None;
     }
@@ -61,6 +73,11 @@ mod imp {
         }
     }
 
+    /// The socket's answer decides on Unix.
+    pub fn other_alive() -> bool {
+        false
+    }
+
     pub fn ask_running() -> bool {
         let Ok(stream) = UnixStream::connect(socket()) else {
             return false;
@@ -97,6 +114,32 @@ mod imp {
         crate::paths::data_dir().join("instance.port")
     }
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateMutexW(
+            attributes: *const std::ffi::c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn GetLastError() -> u32;
+    }
+
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+
+    /// A named mutex Windows keeps while any Lilac of this user's session
+    /// runs, and drops with the process however it ends. The port file
+    /// alone can name a dead port (an instance killed, or overwritten by
+    /// one that started next to it), and then a second Lilac would run.
+    pub fn other_alive() -> bool {
+        let name: Vec<u16> = "Local\\lilac-single-instance"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // The handle stays open for the life of the process on purpose.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        !handle.is_null() && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS
+    }
+
     pub fn ask_running() -> bool {
         let Some(port) = std::fs::read_to_string(port_file())
             .ok()
@@ -128,4 +171,4 @@ mod imp {
     }
 }
 
-use imp::{ask_running, listen};
+use imp::{ask_running, listen, other_alive};
