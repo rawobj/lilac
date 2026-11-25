@@ -1,0 +1,195 @@
+# Builds Lilac for Linux, Windows and macOS.
+#
+# Pushing a tag vX.Y.Z (annotated, its message holding the release notes)
+# builds all three and opens a draft release with the files attached; it is
+# published by hand. Running the workflow by hand builds the same files as
+# artifacts without a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.98.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Read the version, and check it against the tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported runner: the binary then runs on distributions
+          # with an older glibc too.
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          # Spotify builds Soloist for Apple Silicon only.
+          - os: macos-14
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libpulse-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libvulkan-dev
+
+      - name: Test
+        if: runner.os == 'Linux'
+        run: cargo test --locked
+
+      - name: Build
+        run: |
+          # Testers on Windows need no Visual C++ Redistributable.
+          if [ "$RUNNER_OS" = Windows ]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # The system's graphics, audio and font libraries are used, not
+          # bundled ones: bundled GPU and audio stacks break on other drivers.
+          app=dist/Lilac.AppDir
+          mkdir -p "$app/usr/bin"
+          cp target/release/lilac "$app/usr/bin/"
+          cp packaging/lilac.desktop "$app/lilac.desktop"
+          cp assets/app/lilac.svg "$app/lilac.svg"
+          ln -s lilac.svg "$app/.DirIcon"
+          ln -s usr/bin/lilac "$app/AppRun"
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          # The runner has no FUSE for appimagetool's own AppImage.
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --no-appstream "$app" \
+            "dist/lilac-$VERSION-${{ matrix.name }}.AppImage"
+          rm -rf "$app"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dir="lilac-$VERSION-${{ matrix.name }}"
+          mkdir -p "dist/$dir"
+          cp target/release/lilac.exe LICENSE README.md "dist/$dir/"
+          (cd dist && 7z a -tzip -mx=9 "$dir.zip" "$dir")
+          rm -rf "dist/$dir"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          stage=dist/stage
+          app="$stage/Lilac.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/lilac "$app/Contents/MacOS/"
+          cp packaging/macos/lilac.icns "$app/Contents/Resources/"
+          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          # Not notarized: an ad-hoc signature only keeps the bundle intact.
+          codesign --force --deep --sign - "$app"
+          # Opened, the image shows Lilac beside Applications to drag it onto.
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname Lilac -srcfolder "$stage" -fs HFS+ -format UDZO \
+            -ov "dist/lilac-$VERSION-${{ matrix.name }}.dmg"
+          rm -rf "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lilac-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Release notes from the tag
+        run: |
+          # checkout can leave the tag as a plain ref to the commit.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
+            echo "::error::$TAG is not an annotated tag; its message holds the release notes"
+            exit 1
+          fi
+          # The message without its title line and signature.
+          git for-each-ref "refs/tags/$TAG" --format='%(contents)' \
+            | sed '/^-----BEGIN [A-Z ]*SIGNATURE-----$/,$d' \
+            | tail -n +2 | sed '/./,$!d' > notes.md
+          previous=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            link="https://github.com/$GITHUB_REPOSITORY/compare/$previous...$TAG"
+          else
+            link="https://github.com/$GITHUB_REPOSITORY/commits/$TAG"
+          fi
+          printf '\n**All changes:** %s\n' "$link" >> notes.md
+          cat notes.md
+
+      - name: Draft the release
+        run: |
+          gh release create "$TAG" dist/* \
+            --draft --verify-tag \
+            --title "Lilac $VERSION" \
+            --notes-file notes.md
